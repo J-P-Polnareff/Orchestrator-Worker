@@ -7,7 +7,7 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 4B**. Three capabilities are implemented and tested.
+Current status: **Phase 4C**. Three capabilities are implemented and tested.
 
 Routing - `Orchestrator.run(task, worker_name=...)`:
 
@@ -25,7 +25,8 @@ User Task -> Orchestrator -> Planner -> Plan        (stops here)
 Plan execution - `Orchestrator.execute_plan(plan)`:
 
 ```
-Plan -> Router -> Worker (per step) -> AgentState -> ExecutionResult
+Plan -> Router -> Worker (per step) -> AgentState -> ExecutionResult[]
+     -> ExecutionContext
 ```
 
 `plan()` only produces a `Plan`: the planner never executes a step and has no
@@ -34,7 +35,12 @@ order, resolving each `step.worker_name` through a deterministic router (no
 LLM involved) and calling that worker once per step. Each result is an
 `ExecutionResult` that carries the `step_id`, `task` and `worker_name` of the
 step it came from next to the `AgentState` the worker produced, so a result
-never has to be matched back to its step by list position. Execution is
+never has to be matched back to its step by list position.
+
+In short: a `Plan` says what to do, one `ExecutionResult` records one executed
+step, and an `ExecutionContext` is the complete result set of one plan.
+`execute_plan()` still returns the plain result list; `execute_plan_context()`
+returns the same results wrapped in an `ExecutionContext`. Execution is
 strictly sequential: there is no retry, no evaluator, no aggregator and no
 parallel execution.
 
@@ -54,6 +60,7 @@ src/orchestrator_worker/
   state.py         AgentState shared across the pipeline
   plan.py          Plan / PlanStep data model
   execution.py     ExecutionResult: a plan step plus the state it produced
+  context.py       ExecutionContext: a plan plus its complete result set
   router.py        deterministic worker-name -> worker lookup
   orchestrator.py  run() routes, plan() plans, execute_plan() runs a plan
   llm/
@@ -157,12 +164,15 @@ The planner is given the worker names that exist (`registry.names()`) and
 rejects any plan that references a different worker. It receives only that
 read-only list of names, so it cannot look up or run a worker.
 
-### Phase 4B plan execution
+### Phase 4B/4C plan execution
 
 ```python
 results = orchestrator.execute_plan(plan)
 for result in results:
     print(result.step_id, result.worker_name, result.state.final_result)
+
+context = orchestrator.execute_plan_context(plan)
+print(context.plan.goal, len(context.results))
 ```
 
 `execute_plan()` returns one `ExecutionResult` per step, in the same order as
@@ -170,8 +180,10 @@ for result in results:
 and executed with a single `worker.execute(step.task)` call, so steps are
 never merged and never run in parallel. An `ExecutionResult` keeps the
 `step_id`, `task` and `worker_name` of its step next to the `AgentState` the
-worker produced. A step that names an unknown worker raises `RegistryError`,
-and a failing worker's `WorkerError` propagates unchanged.
+worker produced, and `execute_plan_context()` returns the same results as an
+`ExecutionContext` next to the plan they came from. A step that names an
+unknown worker raises `RegistryError`, and a failing worker's `WorkerError`
+propagates unchanged.
 
 ## Tests
 

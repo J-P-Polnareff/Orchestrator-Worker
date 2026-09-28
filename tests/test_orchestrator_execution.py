@@ -13,6 +13,7 @@ from fakes import (
     StubWorker,
     fake_response,
 )
+from orchestrator_worker.context import ExecutionContext
 from orchestrator_worker.execution import ExecutionResult
 from orchestrator_worker.orchestrator import Orchestrator, OrchestratorError
 from orchestrator_worker.plan import Plan, PlanStep
@@ -342,3 +343,121 @@ def test_a_failed_step_raises_instead_of_returning_a_result():
         orchestrator.execute_plan(plan)
 
     assert log == ["research"]
+
+def test_execute_plan_context_returns_an_execution_context():
+    log: list[str] = []
+    orchestrator = Orchestrator(build_registry(RecordingWorker("research", log)))
+    plan = build_plan(step("step_1", "study asyncio", "research"))
+
+    context = orchestrator.execute_plan_context(plan)
+
+    assert isinstance(context, ExecutionContext)
+    assert context.plan is plan
+    assert isinstance(context.results, tuple)
+    assert len(context.results) == 1
+    assert context.results[0].step_id == "step_1"
+
+
+def test_execute_plan_context_keeps_every_step_in_order():
+    log: list[str] = []
+    research = RecordingWorker("research", log)
+    coding = RecordingWorker("coding", log)
+    orchestrator = Orchestrator(build_registry(research, coding))
+    plan = build_plan(
+        step("step_1", "study asyncio", "research"),
+        step("step_2", "write an example", "coding"),
+    )
+
+    context = orchestrator.execute_plan_context(plan)
+
+    assert context.plan is plan
+    assert [r.step_id for r in context.results] == ["step_1", "step_2"]
+    assert [r.task for r in context.results] == ["study asyncio", "write an example"]
+    assert [r.worker_name for r in context.results] == ["research", "coding"]
+    assert log == ["research", "coding"]
+
+
+def test_execute_plan_context_reuses_execute_plan():
+    orchestrator = Orchestrator(build_registry(NamedWorker("research")))
+    calls: list[Plan] = []
+    original = orchestrator.execute_plan
+
+    def recording(plan: Plan) -> list[ExecutionResult]:
+        calls.append(plan)
+        return original(plan)
+
+    orchestrator.execute_plan = recording  # type: ignore[method-assign]
+
+    plan = build_plan(step("step_1", "task", "research"))
+    context = orchestrator.execute_plan_context(plan)
+
+    assert calls == [plan]
+    assert [r.step_id for r in context.results] == ["step_1"]
+
+
+def test_execute_plan_context_does_not_run_workers_twice():
+    registry = SpyRegistry()
+    registry.register(RecordingWorker("research", []))
+    registry.register(RecordingWorker("coding", []))
+    orchestrator = Orchestrator(registry)
+    plan = build_plan(
+        step("step_1", "study asyncio", "research"),
+        step("step_2", "write an example", "coding"),
+    )
+
+    orchestrator.execute_plan_context(plan)
+
+    assert registry.get_calls == ["research", "coding"]
+
+
+def test_execute_plan_context_does_not_call_the_planner():
+    planner = SpyPlanner()
+    orchestrator = Orchestrator(build_registry(NamedWorker("research")), planner=planner)
+    plan = build_plan(step("step_1", "task", "research"))
+
+    orchestrator.execute_plan_context(plan)
+
+    assert planner.calls == []
+
+
+def test_execute_plan_context_never_asks_an_llm():
+    llm = FakeLLMClient(fake_response("unused"))
+    planner = LLMPlanner(llm, available_workers=["research"])
+    orchestrator = Orchestrator(build_registry(NamedWorker("research")), planner=planner)
+    plan = build_plan(step("step_1", "task", "research"))
+
+    orchestrator.execute_plan_context(plan)
+
+    assert llm.requests == []
+
+
+def test_execute_plan_context_propagates_worker_errors():
+    worker = StubWorker(error=WorkerError("boom"))
+    orchestrator = Orchestrator(build_registry(worker))
+    plan = build_plan(step("step_1", "task", "stub"))
+
+    with pytest.raises(WorkerError) as excinfo:
+        orchestrator.execute_plan_context(plan)
+
+    assert str(excinfo.value) == "boom"
+
+
+def test_execute_plan_context_propagates_registry_errors():
+    research = NamedWorker("research")
+    orchestrator = Orchestrator(build_registry(research))
+    plan = build_plan(step("step_1", "task", "translate"))
+
+    with pytest.raises(RegistryError) as excinfo:
+        orchestrator.execute_plan_context(plan)
+
+    assert type(excinfo.value) is RegistryError
+    assert research.calls == []
+
+
+def test_execute_plan_still_returns_a_list():
+    orchestrator = Orchestrator(build_registry(NamedWorker("research")))
+
+    results = orchestrator.execute_plan(build_plan(step("step_1", "task", "research")))
+
+    assert isinstance(results, list)
+    assert len(results) == 1

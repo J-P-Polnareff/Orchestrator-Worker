@@ -14,6 +14,10 @@ Flow (Phase 4A/4B, plan execution)::
     Plan -> Orchestrator -> Router -> Worker (per step)
          -> AgentState -> ExecutionResult
 
+Flow (Phase 4C, execution batch)::
+
+    Plan -> ExecutionResult[] -> ExecutionContext
+
 Each plan step is one independent worker call and steps run strictly in order.
 Every result carries its own ``PlanStep`` metadata, so a result never has to be
 matched back to its step by position. There is no retry, no evaluator, no
@@ -22,6 +26,7 @@ aggregator and no parallel execution yet.
 
 from __future__ import annotations
 
+from .context import ExecutionContext
 from .execution import ExecutionResult
 from .plan import Plan
 from .planner.base import Planner
@@ -119,6 +124,20 @@ class Orchestrator:
                 )
             )
         return results
+
+    def execute_plan_context(self, plan: Plan) -> ExecutionContext:
+        """Execute ``plan`` and return its results as an :class:`ExecutionContext`.
+
+        This is a thin wrapper over :meth:`execute_plan`: it runs no worker
+        itself, never consults the planner and leaves ``plan`` untouched. The
+        context validates that the results describe exactly ``plan``.
+
+        Raises:
+            RegistryError: a step names a worker that is not registered.
+            WorkerError: a worker failed while handling its step.
+            ExecutionContextError: the results do not describe ``plan``.
+        """
+        return ExecutionContext(plan=plan, results=tuple(self.execute_plan(plan)))
 
     def run(self, user_task: str, worker_name: str | None = None) -> AgentState:
         """Route ``user_task`` to ``worker_name``, defaulting to research.
