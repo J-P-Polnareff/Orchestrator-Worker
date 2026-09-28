@@ -7,7 +7,7 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 4C**. Three capabilities are implemented and tested.
+Current status: **Phase 4D**. Four capabilities are implemented and tested.
 
 Routing - `Orchestrator.run(task, worker_name=...)`:
 
@@ -29,6 +29,12 @@ Plan -> Router -> Worker (per step) -> AgentState -> ExecutionResult[]
      -> ExecutionContext
 ```
 
+Aggregation - `Orchestrator.aggregate(context)`:
+
+```
+ExecutionContext -> Aggregator -> Final Answer
+```
+
 `plan()` only produces a `Plan`: the planner never executes a step and has no
 access to the worker registry. `execute_plan()` then walks `plan.steps` in
 order, resolving each `step.worker_name` through a deterministic router (no
@@ -40,9 +46,10 @@ never has to be matched back to its step by list position.
 In short: a `Plan` says what to do, one `ExecutionResult` records one executed
 step, and an `ExecutionContext` is the complete result set of one plan.
 `execute_plan()` still returns the plain result list; `execute_plan_context()`
-returns the same results wrapped in an `ExecutionContext`. Execution is
-strictly sequential: there is no retry, no evaluator, no aggregator and no
-parallel execution.
+returns the same results wrapped in an `ExecutionContext`, and `aggregate()`
+turns that context into the final answer. Execution is strictly sequential and
+aggregation only runs once every step has finished: there is no retry, no
+evaluator and no parallel execution.
 
 ## Design constraints
 
@@ -61,6 +68,9 @@ src/orchestrator_worker/
   plan.py          Plan / PlanStep data model
   execution.py     ExecutionResult: a plan step plus the state it produced
   context.py       ExecutionContext: a plan plus its complete result set
+  aggregators/
+    base.py        Aggregator contract + AggregatorError
+    llm.py         LLMAggregator: ExecutionContext -> final answer
   router.py        deterministic worker-name -> worker lookup
   orchestrator.py  run() routes, plan() plans, execute_plan() runs a plan
   llm/
@@ -184,6 +194,26 @@ worker produced, and `execute_plan_context()` returns the same results as an
 `ExecutionContext` next to the plan they came from. A step that names an
 unknown worker raises `RegistryError`, and a failing worker's `WorkerError`
 propagates unchanged.
+
+### Phase 4D aggregation
+
+```python
+from orchestrator_worker.aggregators import LLMAggregator
+
+aggregator = LLMAggregator(client)
+orchestrator = Orchestrator(registry, planner=planner, aggregator=aggregator)
+
+context = orchestrator.execute_plan_context(orchestrator.plan("research asyncio"))
+print(orchestrator.aggregate(context))
+```
+
+The aggregator receives the whole `ExecutionContext` and writes the final
+answer from results that already exist. It never plans, routes, executes or
+retries anything, and it lays the steps out in `plan` order regardless of how
+`context.results` happens to be ordered. It reaches the model only through
+`LLMClient`, so the aggregation model can be swapped without touching the
+aggregator logic. Evaluator, retry, parallel execution and tool calling are
+still out of scope.
 
 ## Tests
 

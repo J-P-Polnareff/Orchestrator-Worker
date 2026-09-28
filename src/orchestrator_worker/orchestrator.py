@@ -18,6 +18,10 @@ Flow (Phase 4C, execution batch)::
 
     Plan -> ExecutionResult[] -> ExecutionContext
 
+Flow (Phase 4D, aggregation)::
+
+    ExecutionContext -> Aggregator -> Final Answer
+
 Each plan step is one independent worker call and steps run strictly in order.
 Every result carries its own ``PlanStep`` metadata, so a result never has to be
 matched back to its step by position. There is no retry, no evaluator, no
@@ -26,6 +30,7 @@ aggregator and no parallel execution yet.
 
 from __future__ import annotations
 
+from .aggregators.base import Aggregator
 from .context import ExecutionContext
 from .execution import ExecutionResult
 from .plan import Plan
@@ -43,12 +48,13 @@ class OrchestratorError(RuntimeError):
 
 
 class Orchestrator:
-    """Routes one user task to one registered worker, and produces plans."""
+    """Routes a task to a worker, produces plans and aggregates final answers."""
 
     def __init__(
         self,
         workers: WorkerRegistry | BaseWorker,
         planner: Planner | None = None,
+        aggregator: Aggregator | None = None,
     ) -> None:
         """Accept a registry, or a single worker for the Phase 1 shorthand.
 
@@ -56,8 +62,8 @@ class Orchestrator:
         the default target, so ``Orchestrator(worker).run(task)`` keeps working
         exactly as it did before the registry existed.
 
-        ``planner`` is optional so the Phase 2 construction stays valid; it is
-        only used by :meth:`plan`.
+        ``planner`` and ``aggregator`` are optional so earlier constructions
+        stay valid; they are only used by :meth:`plan` and :meth:`aggregate`.
         """
         if isinstance(workers, BaseWorker):
             registry = WorkerRegistry()
@@ -71,6 +77,7 @@ class Orchestrator:
         self._router = Router(registry)
         self._default_worker = default_worker
         self._planner = planner
+        self._aggregator = aggregator
 
     @property
     def worker_name(self) -> str:
@@ -138,6 +145,23 @@ class Orchestrator:
             ExecutionContextError: the results do not describe ``plan``.
         """
         return ExecutionContext(plan=plan, results=tuple(self.execute_plan(plan)))
+
+    def aggregate(self, context: ExecutionContext) -> str:
+        """Return the final answer for ``context`` via the configured aggregator.
+
+        Nothing is executed here: by the time this is called the context already
+        holds every step result, and ``context.plan`` is left untouched.
+
+        Raises:
+            OrchestratorError: no aggregator was configured.
+            AggregatorError: the aggregator could not produce an answer.
+        """
+        if self._aggregator is None:
+            raise OrchestratorError(
+                "no aggregator configured; pass aggregator=... when constructing "
+                "Orchestrator to use aggregate()."
+            )
+        return self._aggregator.aggregate(context)
 
     def run(self, user_task: str, worker_name: str | None = None) -> AgentState:
         """Route ``user_task`` to ``worker_name``, defaulting to research.

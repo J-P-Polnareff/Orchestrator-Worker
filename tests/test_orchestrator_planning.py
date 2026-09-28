@@ -162,6 +162,7 @@ def test_orchestrator_does_not_import_the_concrete_planner():
 
     assert imported == [
         "__future__",
+        ".aggregators.base",
         ".context",
         ".execution",
         ".plan",

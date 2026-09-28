@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from orchestrator_worker.aggregators import Aggregator
+from orchestrator_worker.context import ExecutionContext
 from orchestrator_worker.llm import LLMClient, LLMRequest, LLMResponse
 from orchestrator_worker.plan import Plan, PlanStep
 from orchestrator_worker.planner import Planner
@@ -109,3 +111,18 @@ class SpyPlanner(Planner):
         if self.error is not None:
             raise self.error
         return self.plan
+
+
+class RecordingAggregator(Aggregator):
+    """Aggregator double that records contexts and returns a fixed answer."""
+
+    def __init__(self, answer: str = "final answer", error: Exception | None = None) -> None:
+        self.answer = answer
+        self.error = error
+        self.calls: list[ExecutionContext] = []
+
+    def aggregate(self, context: ExecutionContext) -> str:
+        self.calls.append(context)
+        if self.error is not None:
+            raise self.error
+        return self.answer
