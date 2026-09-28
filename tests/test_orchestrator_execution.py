@@ -1,4 +1,4 @@
-"""Phase 4A tests: sequential plan execution through the router."""
+"""Phase 4A/4B tests: sequential plan execution returning ExecutionResults."""
 
 from __future__ import annotations
 
@@ -13,9 +13,11 @@ from fakes import (
     StubWorker,
     fake_response,
 )
+from orchestrator_worker.execution import ExecutionResult
 from orchestrator_worker.orchestrator import Orchestrator, OrchestratorError
 from orchestrator_worker.plan import Plan, PlanStep
 from orchestrator_worker.planner import LLMPlanner
+from orchestrator_worker.state import AgentState
 from orchestrator_worker.workers import (
     BaseWorker,
     RegistryError,
@@ -43,26 +45,33 @@ def test_execute_plan_runs_a_single_step():
     research = NamedWorker("research", output="research answer")
     orchestrator = Orchestrator(build_registry(research))
 
-    states = orchestrator.execute_plan(build_plan(step("step_1", "study asyncio", "research")))
+    results = orchestrator.execute_plan(
+        build_plan(step("step_1", "study asyncio", "research"))
+    )
 
-    assert len(states) == 1
-    assert states[0].worker_name == "research"
-    assert states[0].worker_output == "research answer"
-    assert states[0].final_result == "research answer"
+    assert len(results) == 1
+    result = results[0]
+    assert isinstance(result, ExecutionResult)
+    assert result.step_id == "step_1"
+    assert result.task == "study asyncio"
+    assert result.worker_name == "research"
+    assert isinstance(result.state, AgentState)
+    assert result.state.worker_output == "research answer"
+    assert result.state.final_result == "research answer"
     assert research.calls == ["study asyncio"]
 
 
-def test_each_state_records_the_step_input_and_output():
+def test_each_result_records_the_step_input_and_output():
     research = NamedWorker("research", output="research answer")
     orchestrator = Orchestrator(build_registry(research))
 
-    state = orchestrator.execute_plan(
+    result = orchestrator.execute_plan(
         build_plan(step("step_1", "study asyncio", "research"))
     )[0]
 
-    assert state.user_task == "study asyncio"
-    assert state.worker_input == "study asyncio"
-    assert state.worker_output == "research answer"
+    assert result.state.user_task == "study asyncio"
+    assert result.state.worker_input == "study asyncio"
+    assert result.state.worker_output == "research answer"
 
 
 def test_execute_plan_runs_steps_in_plan_order():
@@ -75,13 +84,15 @@ def test_execute_plan_runs_steps_in_plan_order():
         step("step_2", "write an example", "coding"),
     )
 
-    states = orchestrator.execute_plan(plan)
+    results = orchestrator.execute_plan(plan)
 
     assert log == ["research", "coding"]
     assert research.calls == ["study asyncio"]
     assert coding.calls == ["write an example"]
-    assert [state.worker_name for state in states] == ["research", "coding"]
-    assert len(states) == len(plan.steps)
+    assert [result.step_id for result in results] == ["step_1", "step_2"]
+    assert [result.task for result in results] == ["study asyncio", "write an example"]
+    assert [result.worker_name for result in results] == ["research", "coding"]
+    assert len(results) == len(plan.steps)
 
 
 def test_execute_plan_follows_plan_order_not_registry_order():
@@ -135,9 +146,9 @@ def test_execute_plan_works_without_a_planner():
     research = NamedWorker("research", output="research answer")
     orchestrator = Orchestrator(build_registry(research))
 
-    states = orchestrator.execute_plan(build_plan(step("step_1", "task", "research")))
+    results = orchestrator.execute_plan(build_plan(step("step_1", "task", "research")))
 
-    assert states[0].worker_output == "research answer"
+    assert results[0].state.worker_output == "research answer"
 
 
 def test_execute_plan_does_not_call_the_planner():
@@ -236,9 +247,9 @@ def test_plan_steps_are_executed_one_at_a_time():
 def test_single_worker_shorthand_still_supports_execute_plan():
     orchestrator = Orchestrator(StubWorker(output="stub answer"))
 
-    states = orchestrator.execute_plan(build_plan(step("step_1", "task", "stub")))
+    results = orchestrator.execute_plan(build_plan(step("step_1", "task", "stub")))
 
-    assert states[0].final_result == "stub answer"
+    assert results[0].state.final_result == "stub answer"
 
 
 def test_run_behaviour_is_unchanged_after_phase_4a():
@@ -270,3 +281,64 @@ def test_plan_behaviour_is_unchanged_after_phase_4a():
 
     assert plan is expected
     assert planner.calls == ["do it"]
+
+def test_each_result_maps_to_its_own_step():
+    log: list[str] = []
+    research = RecordingWorker("research", log)
+    coding = RecordingWorker("coding", log)
+    orchestrator = Orchestrator(build_registry(research, coding))
+    plan = build_plan(
+        step("step_1", "study asyncio", "research"),
+        step("step_2", "write an example", "coding"),
+        step("step_3", "study more", "research"),
+    )
+
+    results = orchestrator.execute_plan(plan)
+
+    assert len(results) == 3
+    assert [(r.step_id, r.task, r.worker_name) for r in results] == [
+        ("step_1", "study asyncio", "research"),
+        ("step_2", "write an example", "coding"),
+        ("step_3", "study more", "research"),
+    ]
+    assert log == ["research", "coding", "research"]
+
+
+def test_each_result_carries_the_state_its_worker_produced():
+    log: list[str] = []
+    research = RecordingWorker("research", log, output="research answer")
+    coding = RecordingWorker("coding", log, output="coding answer")
+    orchestrator = Orchestrator(build_registry(research, coding))
+    plan = build_plan(
+        step("step_1", "study asyncio", "research"),
+        step("step_2", "write an example", "coding"),
+    )
+
+    results = orchestrator.execute_plan(plan)
+
+    assert [r.state.worker_output for r in results] == [
+        "research answer",
+        "coding answer",
+    ]
+    assert [r.state.final_result for r in results] == [
+        "research answer",
+        "coding answer",
+    ]
+    assert [r.state.worker_name for r in results] == ["research", "coding"]
+    assert all(isinstance(r.state, AgentState) for r in results)
+
+
+def test_a_failed_step_raises_instead_of_returning_a_result():
+    log: list[str] = []
+    research = RecordingWorker("research", log)
+    failing = StubWorker(error=WorkerError("boom"))
+    orchestrator = Orchestrator(build_registry(research, failing))
+    plan = build_plan(
+        step("step_1", "study asyncio", "research"),
+        step("step_2", "break here", "stub"),
+    )
+
+    with pytest.raises(WorkerError):
+        orchestrator.execute_plan(plan)
+
+    assert log == ["research"]

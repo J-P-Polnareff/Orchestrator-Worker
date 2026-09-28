@@ -126,6 +126,7 @@ def test_orchestrator_does_not_import_concrete_workers():
 
     assert imported == [
         "__future__",
+        ".execution",
         ".plan",
         ".planner.base",
         ".router",

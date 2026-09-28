@@ -7,7 +7,7 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 4A**. Three capabilities are implemented and tested.
+Current status: **Phase 4B**. Three capabilities are implemented and tested.
 
 Routing - `Orchestrator.run(task, worker_name=...)`:
 
@@ -25,15 +25,18 @@ User Task -> Orchestrator -> Planner -> Plan        (stops here)
 Plan execution - `Orchestrator.execute_plan(plan)`:
 
 ```
-Plan -> Orchestrator -> Router -> Worker (per step) -> AgentState
+Plan -> Router -> Worker (per step) -> AgentState -> ExecutionResult
 ```
 
 `plan()` only produces a `Plan`: the planner never executes a step and has no
 access to the worker registry. `execute_plan()` then walks `plan.steps` in
 order, resolving each `step.worker_name` through a deterministic router (no
-LLM involved) and calling that worker once per step. Execution is strictly
-sequential: there is no retry, no evaluator, no aggregator and no parallel
-execution.
+LLM involved) and calling that worker once per step. Each result is an
+`ExecutionResult` that carries the `step_id`, `task` and `worker_name` of the
+step it came from next to the `AgentState` the worker produced, so a result
+never has to be matched back to its step by list position. Execution is
+strictly sequential: there is no retry, no evaluator, no aggregator and no
+parallel execution.
 
 ## Design constraints
 
@@ -50,6 +53,7 @@ src/orchestrator_worker/
   config.py        env / .env -> immutable Settings
   state.py         AgentState shared across the pipeline
   plan.py          Plan / PlanStep data model
+  execution.py     ExecutionResult: a plan step plus the state it produced
   router.py        deterministic worker-name -> worker lookup
   orchestrator.py  run() routes, plan() plans, execute_plan() runs a plan
   llm/
@@ -153,20 +157,21 @@ The planner is given the worker names that exist (`registry.names()`) and
 rejects any plan that references a different worker. It receives only that
 read-only list of names, so it cannot look up or run a worker.
 
-### Phase 4A plan execution
+### Phase 4B plan execution
 
 ```python
-states = orchestrator.execute_plan(plan)
-for state in states:
-    print(state.worker_name, state.final_result)
+results = orchestrator.execute_plan(plan)
+for result in results:
+    print(result.step_id, result.worker_name, result.state.final_result)
 ```
 
-`execute_plan()` returns one `AgentState` per step, in the same order as
+`execute_plan()` returns one `ExecutionResult` per step, in the same order as
 `plan.steps`. Each step is resolved by `step.worker_name` through the router
 and executed with a single `worker.execute(step.task)` call, so steps are
-never merged and never run in parallel. A step that names an unknown worker
-raises `RegistryError`, and a failing worker's `WorkerError` propagates
-unchanged.
+never merged and never run in parallel. An `ExecutionResult` keeps the
+`step_id`, `task` and `worker_name` of its step next to the `AgentState` the
+worker produced. A step that names an unknown worker raises `RegistryError`,
+and a failing worker's `WorkerError` propagates unchanged.
 
 ## Tests
 

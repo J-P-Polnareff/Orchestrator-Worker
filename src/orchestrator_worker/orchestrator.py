@@ -9,17 +9,20 @@ Flow (Phase 3, planning only)::
 
     User Task -> Orchestrator -> Planner -> Plan        (stops here)
 
-Flow (Phase 4A, plan execution)::
+Flow (Phase 4A/4B, plan execution)::
 
-    Plan -> Orchestrator -> Router -> Worker (per step) -> AgentState
+    Plan -> Orchestrator -> Router -> Worker (per step)
+         -> AgentState -> ExecutionResult
 
 Each plan step is one independent worker call and steps run strictly in order.
-There is no planner-driven execution, no retry, no evaluator, no aggregator and
-no parallel execution yet.
+Every result carries its own ``PlanStep`` metadata, so a result never has to be
+matched back to its step by position. There is no retry, no evaluator, no
+aggregator and no parallel execution yet.
 """
 
 from __future__ import annotations
 
+from .execution import ExecutionResult
 from .plan import Plan
 from .planner.base import Planner
 from .router import Router
@@ -83,20 +86,20 @@ class Orchestrator:
             )
         return self._planner.create_plan(task)
 
-    def execute_plan(self, plan: Plan) -> list[AgentState]:
-        """Execute ``plan`` step by step, in order, and return one state per step.
+    def execute_plan(self, plan: Plan) -> list[ExecutionResult]:
+        """Execute ``plan`` step by step, in order, and return one result per step.
 
         Every step is routed independently through the router, which looks the
         worker up by ``step.worker_name``; the planner is not consulted again.
-        Steps run strictly sequentially, so results are returned in the same
-        order as ``plan.steps``.
+        Steps run strictly sequentially and each result keeps the step it came
+        from, so results are returned in the same order as ``plan.steps``.
 
         Raises:
             RegistryError: a step names a worker that is not registered.
             WorkerError: a worker failed while handling its step. Both errors
                 are propagated unchanged, with no fallback and no retry.
         """
-        results: list[AgentState] = []
+        results: list[ExecutionResult] = []
         for step in plan.steps:
             worker = self._router.resolve(step.worker_name)
             output = worker.execute(step.task)
@@ -106,7 +109,15 @@ class Orchestrator:
             state.worker_input = step.task
             state.worker_output = output
             state.final_result = output
-            results.append(state)
+
+            results.append(
+                ExecutionResult(
+                    step_id=step.id,
+                    task=step.task,
+                    worker_name=worker.name,
+                    state=state,
+                )
+            )
         return results
 
     def run(self, user_task: str, worker_name: str | None = None) -> AgentState:
