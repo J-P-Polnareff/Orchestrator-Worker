@@ -124,7 +124,14 @@ def test_orchestrator_does_not_import_concrete_workers():
         elif isinstance(node, ast.ImportFrom):
             imported.append("." * node.level + (node.module or ""))
 
-    assert imported == ["__future__", ".state", ".workers.base", ".workers.registry"]
+    assert imported == [
+        "__future__",
+        ".plan",
+        ".planner.base",
+        ".state",
+        ".workers.base",
+        ".workers.registry",
+    ]
     assert not any("research" in name or "coding" in name for name in imported)
 
 

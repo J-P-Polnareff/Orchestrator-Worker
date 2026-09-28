@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from orchestrator_worker.llm import LLMClient, LLMRequest, LLMResponse
-from orchestrator_worker.workers import BaseWorker
+from orchestrator_worker.workers import BaseWorker, WorkerRegistry
 
 
 class FakeLLMClient(LLMClient):
@@ -62,3 +62,14 @@ class NamedWorker(BaseWorker):
     def execute(self, task: str) -> str:
         self.calls.append(task)
         return self.output
+
+class SpyRegistry(WorkerRegistry):
+    """WorkerRegistry that records every get() lookup."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.get_calls: list[str] = []
+
+    def get(self, name: str) -> BaseWorker:
+        self.get_calls.append(name)
+        return super().get(name)

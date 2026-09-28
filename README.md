@@ -7,17 +7,24 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 2**. Packaging, configuration, the provider-agnostic
-LLM layer, two workers and explicit registry-based routing work and are tested:
+Current status: **Phase 3**. Two capabilities are implemented and tested.
+
+Routing - `Orchestrator.run(task, worker_name=...)`:
 
 ```
 User Task -> Orchestrator -> WorkerRegistry -> ResearchWorker / CodingWorker
           -> Worker Result -> Final Result
 ```
 
-The caller chooses the worker by name (`run(task, worker_name="coding")`) or
-omits it to get `research`. There is no planner, no automatic task
-classification, no evaluator and no aggregator yet.
+Planning - `Orchestrator.plan(task)`:
+
+```
+User Task -> Orchestrator -> Planner -> Plan        (stops here)
+```
+
+`plan()` only produces a `Plan`. The planner never executes a step and has no
+access to the worker registry, and nothing consumes a plan yet: there is no
+plan-driven execution, no router, no evaluator and no aggregator.
 
 ## Design constraints
 
@@ -33,11 +40,15 @@ classification, no evaluator and no aggregator yet.
 src/orchestrator_worker/
   config.py        env / .env -> immutable Settings
   state.py         AgentState shared across the pipeline
-  orchestrator.py  Phase 1 orchestrator with fixed routing
+  plan.py          Plan / PlanStep data model
+  orchestrator.py  run() routes to a worker; plan() asks the planner
   llm/
     base.py        Message, Usage, LLMRequest, LLMResponse, LLMClient (ABC)
     deepseek.py    DeepSeek adapter over the openai SDK
     factory.py     provider registry -> build_llm_client()
+  planner/
+    base.py        Planner contract + planner errors
+    llm.py         LLMPlanner: prompt -> JSON -> validated Plan
   workers/
     base.py        BaseWorker contract + WorkerError
     registry.py    WorkerRegistry, maps worker names to worker instances
@@ -103,6 +114,34 @@ print(orchestrator.run("Sort dicts by key.", worker_name="coding").worker_name) 
 
 `Orchestrator(single_worker)` also still works: it wraps that one worker in a
 registry and makes it the default target.
+
+### Phase 3 planning
+
+```python
+from orchestrator_worker.config import Settings
+from orchestrator_worker.llm import build_llm_client
+from orchestrator_worker.orchestrator import Orchestrator
+from orchestrator_worker.planner import LLMPlanner
+from orchestrator_worker.workers import CodingWorker, ResearchWorker, WorkerRegistry
+
+client = build_llm_client(Settings.from_env())
+
+registry = WorkerRegistry()
+registry.register(ResearchWorker(client))
+registry.register(CodingWorker(client))
+
+planner = LLMPlanner(client, available_workers=registry.names())
+orchestrator = Orchestrator(registry, planner=planner)
+
+plan = orchestrator.plan("research asyncio and write a small example")
+print(plan.goal)
+for step in plan.steps:
+    print(step.id, step.worker_name, step.task)
+```
+
+The planner is given the worker names that exist (`registry.names()`) and
+rejects any plan that references a different worker. It receives only that
+read-only list of names, so it cannot look up or run a worker.
 
 ## Tests
 
