@@ -7,15 +7,17 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 1**. Packaging, configuration, the provider-agnostic
-LLM layer, and a minimal end-to-end chain work and are tested:
+Current status: **Phase 2**. Packaging, configuration, the provider-agnostic
+LLM layer, two workers and explicit registry-based routing work and are tested:
 
 ```
-User Task -> Orchestrator -> ResearchWorker -> Worker Result -> Final Result
+User Task -> Orchestrator -> WorkerRegistry -> ResearchWorker / CodingWorker
+          -> Worker Result -> Final Result
 ```
 
-Routing is fixed to a single injected worker. Planner, Worker Router,
-Evaluator and Aggregator are not implemented yet.
+The caller chooses the worker by name (`run(task, worker_name="coding")`) or
+omits it to get `research`. There is no planner, no automatic task
+classification, no evaluator and no aggregator yet.
 
 ## Design constraints
 
@@ -38,7 +40,9 @@ src/orchestrator_worker/
     factory.py     provider registry -> build_llm_client()
   workers/
     base.py        BaseWorker contract + WorkerError
+    registry.py    WorkerRegistry, maps worker names to worker instances
     research.py    ResearchWorker, a single LLM call with no tools
+    coding.py      CodingWorker, coding-oriented prompt, no code execution
 tests/             unit tests (network-free)
 ```
 ## Setup
@@ -77,20 +81,28 @@ response = client.complete(
 print(response.content, response.usage.total_tokens)
 ```
 
-### Phase 1 chain
+### Phase 2 chain
 
 ```python
 from orchestrator_worker.config import Settings
 from orchestrator_worker.llm import build_llm_client
 from orchestrator_worker.orchestrator import Orchestrator
-from orchestrator_worker.workers import ResearchWorker
+from orchestrator_worker.workers import CodingWorker, ResearchWorker, WorkerRegistry
 
 client = build_llm_client(Settings.from_env())
-state = Orchestrator(ResearchWorker(client)).run("What is DeepSeek V3?")
 
-print(state.worker_name)    # 'research'
-print(state.final_result)
+registry = WorkerRegistry()
+registry.register(ResearchWorker(client))
+registry.register(CodingWorker(client))
+
+orchestrator = Orchestrator(registry)
+
+print(orchestrator.run("What is DeepSeek V3?").worker_name)              # 'research'
+print(orchestrator.run("Sort dicts by key.", worker_name="coding").worker_name)  # 'coding'
 ```
+
+`Orchestrator(single_worker)` also still works: it wraps that one worker in a
+registry and makes it the default target.
 
 ## Tests
 

@@ -49,3 +49,16 @@ class StubWorker(BaseWorker):
 def fake_response(content: str = "stub answer", model: str = "fake-model") -> LLMResponse:
     """Build an LLMResponse without touching any provider."""
     return LLMResponse(content=content, model=model)
+
+
+class NamedWorker(BaseWorker):
+    """Minimal worker whose name is chosen at construction time."""
+
+    def __init__(self, name: str, output: str | None = None) -> None:
+        self.name = name
+        self.output = output if output is not None else f"{name} output"
+        self.calls: list[str] = []
+
+    def execute(self, task: str) -> str:
+        self.calls.append(task)
+        return self.output
