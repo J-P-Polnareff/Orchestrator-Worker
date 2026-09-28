@@ -7,9 +7,15 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **skeleton**. Packaging, configuration, and the
-provider-agnostic LLM layer exist and are tested. The agent stages above are
-not implemented yet.
+Current status: **Phase 1**. Packaging, configuration, the provider-agnostic
+LLM layer, and a minimal end-to-end chain work and are tested:
+
+```
+User Task -> Orchestrator -> ResearchWorker -> Worker Result -> Final Result
+```
+
+Routing is fixed to a single injected worker. Planner, Worker Router,
+Evaluator and Aggregator are not implemented yet.
 
 ## Design constraints
 
@@ -24,10 +30,15 @@ not implemented yet.
 ```
 src/orchestrator_worker/
   config.py        env / .env -> immutable Settings
+  state.py         AgentState shared across the pipeline
+  orchestrator.py  Phase 1 orchestrator with fixed routing
   llm/
     base.py        Message, Usage, LLMRequest, LLMResponse, LLMClient (ABC)
     deepseek.py    DeepSeek adapter over the openai SDK
     factory.py     provider registry -> build_llm_client()
+  workers/
+    base.py        BaseWorker contract + WorkerError
+    research.py    ResearchWorker, a single LLM call with no tools
 tests/             unit tests (network-free)
 ```
 ## Setup
@@ -64,6 +75,21 @@ response = client.complete(
     LLMRequest(messages=[Message.user("Say hello in one word.")])
 )
 print(response.content, response.usage.total_tokens)
+```
+
+### Phase 1 chain
+
+```python
+from orchestrator_worker.config import Settings
+from orchestrator_worker.llm import build_llm_client
+from orchestrator_worker.orchestrator import Orchestrator
+from orchestrator_worker.workers import ResearchWorker
+
+client = build_llm_client(Settings.from_env())
+state = Orchestrator(ResearchWorker(client)).run("What is DeepSeek V3?")
+
+print(state.worker_name)    # 'research'
+print(state.final_result)
 ```
 
 ## Tests
