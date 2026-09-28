@@ -1,4 +1,4 @@
-"""Orchestrator: routes a user task to a worker, and can ask a planner for a plan.
+"""Orchestrator: route a task to a worker, plan, and execute a plan.
 
 Flow (Phase 2, unchanged)::
 
@@ -9,15 +9,20 @@ Flow (Phase 3, planning only)::
 
     User Task -> Orchestrator -> Planner -> Plan        (stops here)
 
-``plan()`` only produces a :class:`~orchestrator_worker.plan.Plan`. It does not
-execute any step of that plan. There is no planner-driven execution, no router,
-no evaluator and no aggregator yet.
+Flow (Phase 4A, plan execution)::
+
+    Plan -> Orchestrator -> Router -> Worker (per step) -> AgentState
+
+Each plan step is one independent worker call and steps run strictly in order.
+There is no planner-driven execution, no retry, no evaluator, no aggregator and
+no parallel execution yet.
 """
 
 from __future__ import annotations
 
 from .plan import Plan
 from .planner.base import Planner
+from .router import Router
 from .state import AgentState
 from .workers.base import BaseWorker, WorkerError
 from .workers.registry import WorkerRegistry
@@ -55,6 +60,7 @@ class Orchestrator:
             default_worker = DEFAULT_WORKER_NAME
 
         self._registry = registry
+        self._router = Router(registry)
         self._default_worker = default_worker
         self._planner = planner
 
@@ -76,6 +82,32 @@ class Orchestrator:
                 "Orchestrator to use plan()."
             )
         return self._planner.create_plan(task)
+
+    def execute_plan(self, plan: Plan) -> list[AgentState]:
+        """Execute ``plan`` step by step, in order, and return one state per step.
+
+        Every step is routed independently through the router, which looks the
+        worker up by ``step.worker_name``; the planner is not consulted again.
+        Steps run strictly sequentially, so results are returned in the same
+        order as ``plan.steps``.
+
+        Raises:
+            RegistryError: a step names a worker that is not registered.
+            WorkerError: a worker failed while handling its step. Both errors
+                are propagated unchanged, with no fallback and no retry.
+        """
+        results: list[AgentState] = []
+        for step in plan.steps:
+            worker = self._router.resolve(step.worker_name)
+            output = worker.execute(step.task)
+
+            state = AgentState(user_task=step.task)
+            state.worker_name = worker.name
+            state.worker_input = step.task
+            state.worker_output = output
+            state.final_result = output
+            results.append(state)
+        return results
 
     def run(self, user_task: str, worker_name: str | None = None) -> AgentState:
         """Route ``user_task`` to ``worker_name``, defaulting to research.

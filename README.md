@@ -7,7 +7,7 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 3**. Two capabilities are implemented and tested.
+Current status: **Phase 4A**. Three capabilities are implemented and tested.
 
 Routing - `Orchestrator.run(task, worker_name=...)`:
 
@@ -22,9 +22,18 @@ Planning - `Orchestrator.plan(task)`:
 User Task -> Orchestrator -> Planner -> Plan        (stops here)
 ```
 
-`plan()` only produces a `Plan`. The planner never executes a step and has no
-access to the worker registry, and nothing consumes a plan yet: there is no
-plan-driven execution, no router, no evaluator and no aggregator.
+Plan execution - `Orchestrator.execute_plan(plan)`:
+
+```
+Plan -> Orchestrator -> Router -> Worker (per step) -> AgentState
+```
+
+`plan()` only produces a `Plan`: the planner never executes a step and has no
+access to the worker registry. `execute_plan()` then walks `plan.steps` in
+order, resolving each `step.worker_name` through a deterministic router (no
+LLM involved) and calling that worker once per step. Execution is strictly
+sequential: there is no retry, no evaluator, no aggregator and no parallel
+execution.
 
 ## Design constraints
 
@@ -41,7 +50,8 @@ src/orchestrator_worker/
   config.py        env / .env -> immutable Settings
   state.py         AgentState shared across the pipeline
   plan.py          Plan / PlanStep data model
-  orchestrator.py  run() routes to a worker; plan() asks the planner
+  router.py        deterministic worker-name -> worker lookup
+  orchestrator.py  run() routes, plan() plans, execute_plan() runs a plan
   llm/
     base.py        Message, Usage, LLMRequest, LLMResponse, LLMClient (ABC)
     deepseek.py    DeepSeek adapter over the openai SDK
@@ -142,6 +152,21 @@ for step in plan.steps:
 The planner is given the worker names that exist (`registry.names()`) and
 rejects any plan that references a different worker. It receives only that
 read-only list of names, so it cannot look up or run a worker.
+
+### Phase 4A plan execution
+
+```python
+states = orchestrator.execute_plan(plan)
+for state in states:
+    print(state.worker_name, state.final_result)
+```
+
+`execute_plan()` returns one `AgentState` per step, in the same order as
+`plan.steps`. Each step is resolved by `step.worker_name` through the router
+and executed with a single `worker.execute(step.task)` call, so steps are
+never merged and never run in parallel. A step that names an unknown worker
+raises `RegistryError`, and a failing worker's `WorkerError` propagates
+unchanged.
 
 ## Tests
 

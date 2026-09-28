@@ -128,6 +128,7 @@ def test_orchestrator_does_not_import_concrete_workers():
         "__future__",
         ".plan",
         ".planner.base",
+        ".router",
         ".state",
         ".workers.base",
         ".workers.registry",
