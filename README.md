@@ -7,7 +7,8 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 4D**. Four capabilities are implemented and tested.
+Current status: **Phase 4E (first step)**. The request flow below is unchanged;
+a standalone evaluation layer has been added alongside it.
 
 Routing - `Orchestrator.run(task, worker_name=...)`:
 
@@ -35,6 +36,13 @@ Aggregation - `Orchestrator.aggregate(context)`:
 ExecutionContext -> Aggregator -> Final Answer
 ```
 
+Evaluation (standalone, not wired into the orchestrator yet) -
+`LLMEvaluator.evaluate(context)`:
+
+```
+ExecutionContext -> Evaluator -> EvaluationResult
+```
+
 `plan()` only produces a `Plan`: the planner never executes a step and has no
 access to the worker registry. `execute_plan()` then walks `plan.steps` in
 order, resolving each `step.worker_name` through a deterministic router (no
@@ -48,8 +56,10 @@ step, and an `ExecutionContext` is the complete result set of one plan.
 `execute_plan()` still returns the plain result list; `execute_plan_context()`
 returns the same results wrapped in an `ExecutionContext`, and `aggregate()`
 turns that context into the final answer. Execution is strictly sequential and
-aggregation only runs once every step has finished: there is no retry, no
-evaluator and no parallel execution.
+aggregation only runs once every step has finished. Evaluation exists as a
+standalone component (`Evaluator` / `LLMEvaluator`) that is not part of the
+orchestrator flow yet: there is no retry, no replanning and no parallel
+execution.
 
 ## Design constraints
 
@@ -71,6 +81,10 @@ src/orchestrator_worker/
   aggregators/
     base.py        Aggregator contract + AggregatorError
     llm.py         LLMAggregator: ExecutionContext -> final answer
+  evaluation.py    EvaluationResult + EvaluationError
+  evaluators/
+    base.py        Evaluator contract + EvaluatorError
+    llm.py         LLMEvaluator: ExecutionContext -> EvaluationResult
   router.py        deterministic worker-name -> worker lookup
   orchestrator.py  run() routes, plan() plans, execute_plan() runs a plan
   llm/
@@ -212,8 +226,26 @@ answer from results that already exist. It never plans, routes, executes or
 retries anything, and it lays the steps out in `plan` order regardless of how
 `context.results` happens to be ordered. It reaches the model only through
 `LLMClient`, so the aggregation model can be swapped without touching the
-aggregator logic. Evaluator, retry, parallel execution and tool calling are
-still out of scope.
+aggregator logic. Retry, parallel execution and tool calling are still out of
+scope.
+
+### Phase 4E evaluation (standalone)
+
+```python
+from orchestrator_worker.evaluators import LLMEvaluator
+
+evaluator = LLMEvaluator(client)
+verdict = evaluator.evaluate(context)
+
+print(verdict.passed, verdict.reason)
+```
+
+The evaluator inspects a finished `ExecutionContext` and returns an
+`EvaluationResult`: whether those results are enough to produce the final
+answer, plus a reason. It lays the steps out in `plan` order, reaches the model
+only through `LLMClient`, and never plans, executes, retries or modifies the
+context. It is deliberately not wired into `Orchestrator` yet, and it is a
+separate component from the aggregator.
 
 ## Tests
 
