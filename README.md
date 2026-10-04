@@ -7,9 +7,9 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 4F (pipeline orchestration)**. The full flow below is
-available as an explicit `run_pipeline()` call; the older entry points keep
-their original behaviour.
+Current status: **Phase 5A (application composition root)**. `build_orchestrator()`
+assembles the concrete components into a ready `Orchestrator`; the flow below is
+unchanged.
 
 Routing - `Orchestrator.run(task, worker_name=...)`:
 
@@ -107,6 +107,7 @@ src/orchestrator_worker/
   router.py        deterministic worker-name -> worker lookup
   orchestrator.py  run() routes, plan() plans, execute_plan() runs a plan,
                    run_pipeline() chains the full plan/execute/aggregate flow
+  application.py   build_orchestrator(): concrete wiring for a ready Orchestrator
   llm/
     base.py        Message, Usage, LLMRequest, LLMResponse, LLMClient (ABC)
     deepseek.py    DeepSeek adapter over the openai SDK
@@ -308,6 +309,29 @@ attempt is aggregated more than once, and errors (`PlannerError`,
 `WorkerError`, `RegistryError`, `EvaluatorError`, `RetryError`,
 `AggregatorError`, `OrchestratorError`) propagate unchanged. `run()` still works
 exactly as before.
+
+### Phase 5A application wiring
+
+```python
+from orchestrator_worker.application import build_orchestrator
+
+orchestrator = build_orchestrator()        # builds the configured provider
+
+# or inject a client explicitly (tests, alternate providers):
+orchestrator = build_orchestrator(client)
+
+answer = orchestrator.run_pipeline("research asyncio and write a small example")
+```
+
+`build_orchestrator()` is the composition root. It creates the LLM client (or
+accepts an injected one), registers `ResearchWorker` and `CodingWorker` in a
+`WorkerRegistry`, and builds the `LLMPlanner` (given the registry's worker
+names), `LLMEvaluator` and `LLMAggregator` - all sharing that same `LLMClient` -
+then injects them into an `Orchestrator`. It only constructs and injects: it
+never plans, executes or calls a model, so building is side-effect free.
+`orchestrator.py` still imports no concrete provider or worker; only this module
+depends on concrete implementations. Phase 5A does not add provider routing, a
+Claude adapter, real-API integration tests or tool calling.
 
 ## Tests
 

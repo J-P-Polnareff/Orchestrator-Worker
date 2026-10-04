@@ -177,3 +177,28 @@ class RecordingEvaluator(Evaluator):
             raise self.error
         index = min(len(self.calls) - 1, len(self.verdicts) - 1)
         return self.verdicts[index]
+
+
+class SequenceLLMClient(LLMClient):
+    """LLM double that returns scripted responses in order.
+
+    Every call is recorded. Calling it more often than there are scripted
+    responses raises instead of silently repeating the last one, so a test can
+    assert the exact number of model calls.
+    """
+
+    name = "fake-sequence"
+
+    def __init__(self, responses: list[LLMResponse]) -> None:
+        self.responses = list(responses)
+        self.requests: list[LLMRequest] = []
+
+    def complete(self, request: LLMRequest) -> LLMResponse:
+        index = len(self.requests)
+        self.requests.append(request)
+        if index >= len(self.responses):
+            raise AssertionError(
+                f"SequenceLLMClient received call #{index + 1} but only "
+                f"{len(self.responses)} responses were scripted."
+            )
+        return self.responses[index]
