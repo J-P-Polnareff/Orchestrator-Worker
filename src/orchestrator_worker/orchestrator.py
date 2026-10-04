@@ -22,19 +22,27 @@ Flow (Phase 4D, aggregation)::
 
     ExecutionContext -> Aggregator -> Final Answer
 
+Flow (Phase 4E, whole-plan retry)::
+
+    Plan -> execute_plan_context -> Evaluator -> passed? -> return context
+                                              -> failed? -> execute the plan again
+
 Each plan step is one independent worker call and steps run strictly in order.
 Every result carries its own ``PlanStep`` metadata, so a result never has to be
-matched back to its step by position. There is no retry, no evaluator, no
-aggregator and no parallel execution yet.
+matched back to its step by position. Retries are evaluator-driven and always
+re-run the whole plan: there is no replanning, no targeted per-step retry and
+no parallel execution.
 """
 
 from __future__ import annotations
 
 from .aggregators.base import Aggregator
 from .context import ExecutionContext
+from .evaluators.base import Evaluator
 from .execution import ExecutionResult
 from .plan import Plan
 from .planner.base import Planner
+from .retry import RetryError
 from .router import Router
 from .state import AgentState
 from .workers.base import BaseWorker, WorkerError
@@ -55,6 +63,7 @@ class Orchestrator:
         workers: WorkerRegistry | BaseWorker,
         planner: Planner | None = None,
         aggregator: Aggregator | None = None,
+        evaluator: Evaluator | None = None,
     ) -> None:
         """Accept a registry, or a single worker for the Phase 1 shorthand.
 
@@ -62,8 +71,9 @@ class Orchestrator:
         the default target, so ``Orchestrator(worker).run(task)`` keeps working
         exactly as it did before the registry existed.
 
-        ``planner`` and ``aggregator`` are optional so earlier constructions
-        stay valid; they are only used by :meth:`plan` and :meth:`aggregate`.
+        ``planner``, ``aggregator`` and ``evaluator`` are optional so earlier
+        constructions stay valid; they are only used by :meth:`plan`,
+        :meth:`aggregate` and :meth:`execute_plan_with_retry`.
         """
         if isinstance(workers, BaseWorker):
             registry = WorkerRegistry()
@@ -78,6 +88,7 @@ class Orchestrator:
         self._default_worker = default_worker
         self._planner = planner
         self._aggregator = aggregator
+        self._evaluator = evaluator
 
     @property
     def worker_name(self) -> str:
@@ -162,6 +173,69 @@ class Orchestrator:
                 "Orchestrator to use aggregate()."
             )
         return self._aggregator.aggregate(context)
+
+    def execute_plan_with_retry(
+        self,
+        plan: Plan,
+        *,
+        max_retries: int = 1,
+    ) -> ExecutionContext:
+        """Execute ``plan``, evaluate it, and re-run the whole plan on failure.
+
+        ``max_retries`` counts the extra attempts *after* the first execution,
+        so the plan runs at most ``max_retries + 1`` times and is evaluated at
+        most ``max_retries + 1`` times. Every attempt re-executes the plan from
+        scratch through :meth:`execute_plan_context`: nothing is cached and no
+        result is reused. The plan itself is never modified and never re-planned.
+
+        Only ``EvaluationResult.passed is False`` starts another attempt. Errors
+        raised while executing the plan or while evaluating it (``WorkerError``,
+        ``RegistryError``, ``EvaluatorError``, ``EvaluationError``) propagate
+        unchanged and never trigger a retry.
+
+        Raises:
+            OrchestratorError: ``plan`` is not a Plan, no evaluator was
+                configured, or ``max_retries`` is not a non-negative int.
+            RetryError: the evaluator reported ``passed=False`` and no attempts
+                are left.
+            RegistryError: a step names a worker that is not registered.
+            WorkerError: a worker failed while handling its step.
+            EvaluatorError: the evaluator could not produce a verdict.
+        """
+        if not isinstance(plan, Plan):
+            raise OrchestratorError(f"plan must be a Plan, got {type(plan).__name__}.")
+        attempts = self._validated_attempt_budget(max_retries)
+        if self._evaluator is None:
+            raise OrchestratorError(
+                "no evaluator configured; pass evaluator=... when constructing "
+                "Orchestrator to use execute_plan_with_retry()."
+            )
+
+        last_reason = ""
+        for _ in range(attempts):
+            context = self.execute_plan_context(plan)
+
+            evaluation = self._evaluator.evaluate(context)
+            if evaluation.passed:
+                return context
+
+            last_reason = evaluation.reason
+
+        raise RetryError(
+            f"evaluation failed after {attempts} attempt(s): {last_reason}"
+        )
+
+    @staticmethod
+    def _validated_attempt_budget(max_retries: int) -> int:
+        """Return ``max_retries + 1`` attempts, or raise ``OrchestratorError``."""
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int):
+            raise OrchestratorError(
+                "max_retries must be an int (bools are not accepted), "
+                f"got {type(max_retries).__name__}."
+            )
+        if max_retries < 0:
+            raise OrchestratorError(f"max_retries must be >= 0, got {max_retries}.")
+        return max_retries + 1
 
     def run(self, user_task: str, worker_name: str | None = None) -> AgentState:
         """Route ``user_task`` to ``worker_name``, defaulting to research.

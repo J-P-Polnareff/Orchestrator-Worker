@@ -7,8 +7,8 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 4E (first step)**. The request flow below is unchanged;
-a standalone evaluation layer has been added alongside it.
+Current status: **Phase 4E (second step)**. Evaluation and evaluator-driven
+whole-plan retry are implemented; the request flow below is still unchanged.
 
 Routing - `Orchestrator.run(task, worker_name=...)`:
 
@@ -36,11 +36,18 @@ Aggregation - `Orchestrator.aggregate(context)`:
 ExecutionContext -> Aggregator -> Final Answer
 ```
 
-Evaluation (standalone, not wired into the orchestrator yet) -
-`LLMEvaluator.evaluate(context)`:
+Evaluation (standalone) - `LLMEvaluator.evaluate(context)`:
 
 ```
 ExecutionContext -> Evaluator -> EvaluationResult
+```
+
+Retry - `Orchestrator.execute_plan_with_retry(plan, max_retries=...)`:
+
+```
+Plan -> execute -> evaluate -> passed? -> ExecutionContext
+                            -> failed? -> execute the whole plan again
+                            -> budget spent? -> RetryError
 ```
 
 `plan()` only produces a `Plan`: the planner never executes a step and has no
@@ -57,9 +64,10 @@ step, and an `ExecutionContext` is the complete result set of one plan.
 returns the same results wrapped in an `ExecutionContext`, and `aggregate()`
 turns that context into the final answer. Execution is strictly sequential and
 aggregation only runs once every step has finished. Evaluation exists as a
-standalone component (`Evaluator` / `LLMEvaluator`) that is not part of the
-orchestrator flow yet: there is no retry, no replanning and no parallel
-execution.
+standalone component (`Evaluator` / `LLMEvaluator`), and
+`execute_plan_with_retry()` re-runs the whole plan when the evaluator reports
+`passed=False`. There is no replanning, no targeted per-step retry, no
+automatic aggregation and no parallel execution.
 
 ## Design constraints
 
@@ -85,6 +93,7 @@ src/orchestrator_worker/
   evaluators/
     base.py        Evaluator contract + EvaluatorError
     llm.py         LLMEvaluator: ExecutionContext -> EvaluationResult
+  retry.py         RetryError: evaluation failed, retry budget exhausted
   router.py        deterministic worker-name -> worker lookup
   orchestrator.py  run() routes, plan() plans, execute_plan() runs a plan
   llm/
@@ -229,7 +238,7 @@ retries anything, and it lays the steps out in `plan` order regardless of how
 aggregator logic. Retry, parallel execution and tool calling are still out of
 scope.
 
-### Phase 4E evaluation (standalone)
+### Phase 4E evaluation and retry
 
 ```python
 from orchestrator_worker.evaluators import LLMEvaluator
@@ -244,8 +253,24 @@ The evaluator inspects a finished `ExecutionContext` and returns an
 `EvaluationResult`: whether those results are enough to produce the final
 answer, plus a reason. It lays the steps out in `plan` order, reaches the model
 only through `LLMClient`, and never plans, executes, retries or modifies the
-context. It is deliberately not wired into `Orchestrator` yet, and it is a
-separate component from the aggregator.
+context. It is a separate component from the aggregator.
+
+#### Evaluator-driven retry
+
+```python
+orchestrator = Orchestrator(registry, evaluator=LLMEvaluator(client))
+
+context = orchestrator.execute_plan_with_retry(plan, max_retries=1)
+```
+
+`max_retries` counts the extra attempts after the first execution, so
+`max_retries=1` runs the plan at most twice. Every attempt re-executes the
+whole plan from scratch and re-evaluates it; an individual step is never
+retried on its own, because an `EvaluationResult` carries no failing step id.
+Only `passed=False` starts another attempt, and once the budget is spent the
+method raises `RetryError` carrying the last reason. Worker, registry and
+evaluator errors propagate unchanged instead of turning into a retry, the plan
+is never re-planned, and the aggregator is not called automatically.
 
 ## Tests
 

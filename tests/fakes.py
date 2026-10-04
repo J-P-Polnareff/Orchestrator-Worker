@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from orchestrator_worker.aggregators import Aggregator
 from orchestrator_worker.context import ExecutionContext
+from orchestrator_worker.evaluation import EvaluationResult
+from orchestrator_worker.evaluators import Evaluator
 from orchestrator_worker.llm import LLMClient, LLMRequest, LLMResponse
 from orchestrator_worker.plan import Plan, PlanStep
 from orchestrator_worker.planner import Planner
@@ -126,3 +128,31 @@ class RecordingAggregator(Aggregator):
         if self.error is not None:
             raise self.error
         return self.answer
+
+class RecordingEvaluator(Evaluator):
+    """Evaluator double that replays scripted verdicts and records contexts.
+
+    The last scripted verdict repeats if ``evaluate`` is called more often than
+    verdicts were supplied, so a single verdict can be used for both the pass
+    and the fail cases.
+    """
+
+    def __init__(
+        self,
+        verdicts: list[EvaluationResult] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.verdicts = (
+            list(verdicts)
+            if verdicts is not None
+            else [EvaluationResult(passed=True, reason="ok")]
+        )
+        self.error = error
+        self.calls: list[ExecutionContext] = []
+
+    def evaluate(self, context: ExecutionContext) -> EvaluationResult:
+        self.calls.append(context)
+        if self.error is not None:
+            raise self.error
+        index = min(len(self.calls) - 1, len(self.verdicts) - 1)
+        return self.verdicts[index]
