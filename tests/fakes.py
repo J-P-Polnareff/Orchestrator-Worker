@@ -100,16 +100,24 @@ class SpyRegistry(WorkerRegistry):
 class SpyPlanner(Planner):
     """Planner that records calls and returns a fixed plan, or raises."""
 
-    def __init__(self, plan: Plan | None = None, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        plan: Plan | None = None,
+        error: Exception | None = None,
+        log: list[str] | None = None,
+    ) -> None:
         self.plan = plan or Plan(
             goal="a goal",
             steps=[PlanStep(id="step_1", task="a task", worker_name="research")],
         )
         self.error = error
+        self.log = log
         self.calls: list[str] = []
 
     def create_plan(self, task: str) -> Plan:
         self.calls.append(task)
+        if self.log is not None:
+            self.log.append("planner")
         if self.error is not None:
             raise self.error
         return self.plan
@@ -118,16 +126,25 @@ class SpyPlanner(Planner):
 class RecordingAggregator(Aggregator):
     """Aggregator double that records contexts and returns a fixed answer."""
 
-    def __init__(self, answer: str = "final answer", error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        answer: str = "final answer",
+        error: Exception | None = None,
+        log: list[str] | None = None,
+    ) -> None:
         self.answer = answer
         self.error = error
+        self.log = log
         self.calls: list[ExecutionContext] = []
 
     def aggregate(self, context: ExecutionContext) -> str:
         self.calls.append(context)
+        if self.log is not None:
+            self.log.append("aggregator")
         if self.error is not None:
             raise self.error
         return self.answer
+
 
 class RecordingEvaluator(Evaluator):
     """Evaluator double that replays scripted verdicts and records contexts.
@@ -141,6 +158,7 @@ class RecordingEvaluator(Evaluator):
         self,
         verdicts: list[EvaluationResult] | None = None,
         error: Exception | None = None,
+        log: list[str] | None = None,
     ) -> None:
         self.verdicts = (
             list(verdicts)
@@ -148,10 +166,13 @@ class RecordingEvaluator(Evaluator):
             else [EvaluationResult(passed=True, reason="ok")]
         )
         self.error = error
+        self.log = log
         self.calls: list[ExecutionContext] = []
 
     def evaluate(self, context: ExecutionContext) -> EvaluationResult:
         self.calls.append(context)
+        if self.log is not None:
+            self.log.append("evaluator")
         if self.error is not None:
             raise self.error
         index = min(len(self.calls) - 1, len(self.verdicts) - 1)

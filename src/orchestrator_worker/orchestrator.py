@@ -27,6 +27,11 @@ Flow (Phase 4E, whole-plan retry)::
     Plan -> execute_plan_context -> Evaluator -> passed? -> return context
                                               -> failed? -> execute the plan again
 
+Flow (Phase 4F, full pipeline)::
+
+    User Task -> plan -> Plan -> execute_plan_with_retry -> ExecutionContext
+              -> aggregate -> Final Answer
+
 Each plan step is one independent worker call and steps run strictly in order.
 Every result carries its own ``PlanStep`` metadata, so a result never has to be
 matched back to its step by position. Retries are evaluator-driven and always
@@ -236,6 +241,41 @@ class Orchestrator:
         if max_retries < 0:
             raise OrchestratorError(f"max_retries must be >= 0, got {max_retries}.")
         return max_retries + 1
+
+    def run_pipeline(self, user_task: str, *, max_retries: int = 1) -> str:
+        """Run the full pipeline: plan, execute with retry, then aggregate.
+
+        This is the explicit end-to-end flow::
+
+            user_task -> plan -> Plan -> execute_plan_with_retry
+                      -> ExecutionContext -> aggregate -> final answer
+
+        It is pure orchestration over the existing high-level methods: the
+        planner runs exactly once, :meth:`execute_plan_with_retry` executes
+        (and re-executes) the plan and evaluates it, and only the context that
+        passed evaluation is handed to :meth:`aggregate`. Nothing is cached,
+        re-planned or run in parallel, and no exception is swallowed.
+
+        ``max_retries`` is validated by :meth:`execute_plan_with_retry`; a
+        missing planner, evaluator or aggregator raises the same
+        ``OrchestratorError`` those methods already raise.
+
+        Raises:
+            OrchestratorError: no planner, evaluator or aggregator configured,
+                or ``max_retries`` is not a non-negative int.
+            RetryError: the evaluator reported ``passed=False`` and the retry
+                budget is exhausted; the aggregator is not called.
+            PlannerError: the planner could not produce a valid plan.
+            RegistryError: a step names a worker that is not registered.
+            WorkerError: a worker failed while handling its step.
+            EvaluatorError: the evaluator could not produce a verdict.
+            AggregatorError: the aggregator could not produce an answer.
+        """
+        plan = self.plan(user_task)
+
+        context = self.execute_plan_with_retry(plan, max_retries=max_retries)
+
+        return self.aggregate(context)
 
     def run(self, user_task: str, worker_name: str | None = None) -> AgentState:
         """Route ``user_task`` to ``worker_name``, defaulting to research.

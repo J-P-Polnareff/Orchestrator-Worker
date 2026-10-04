@@ -7,8 +7,9 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 4E (second step)**. Evaluation and evaluator-driven
-whole-plan retry are implemented; the request flow below is still unchanged.
+Current status: **Phase 4F (pipeline orchestration)**. The full flow below is
+available as an explicit `run_pipeline()` call; the older entry points keep
+their original behaviour.
 
 Routing - `Orchestrator.run(task, worker_name=...)`:
 
@@ -50,6 +51,13 @@ Plan -> execute -> evaluate -> passed? -> ExecutionContext
                             -> budget spent? -> RetryError
 ```
 
+Pipeline - `Orchestrator.run_pipeline(task, max_retries=...)`:
+
+```
+User Task -> Planner -> Plan -> execute_plan_with_retry -> ExecutionContext
+          -> Aggregator -> Final Answer
+```
+
 `plan()` only produces a `Plan`: the planner never executes a step and has no
 access to the worker registry. `execute_plan()` then walks `plan.steps` in
 order, resolving each `step.worker_name` through a deterministic router (no
@@ -66,8 +74,10 @@ turns that context into the final answer. Execution is strictly sequential and
 aggregation only runs once every step has finished. Evaluation exists as a
 standalone component (`Evaluator` / `LLMEvaluator`), and
 `execute_plan_with_retry()` re-runs the whole plan when the evaluator reports
-`passed=False`. There is no replanning, no targeted per-step retry, no
-automatic aggregation and no parallel execution.
+`passed=False`. `run_pipeline()` chains these layers explicitly - plan once,
+execute with retry, then aggregate only the context that passed - while `run()`
+keeps its original single-worker behaviour. There is no replanning, no targeted
+per-step retry, no automatic aggregation and no parallel execution.
 
 ## Design constraints
 
@@ -95,7 +105,8 @@ src/orchestrator_worker/
     llm.py         LLMEvaluator: ExecutionContext -> EvaluationResult
   retry.py         RetryError: evaluation failed, retry budget exhausted
   router.py        deterministic worker-name -> worker lookup
-  orchestrator.py  run() routes, plan() plans, execute_plan() runs a plan
+  orchestrator.py  run() routes, plan() plans, execute_plan() runs a plan,
+                   run_pipeline() chains the full plan/execute/aggregate flow
   llm/
     base.py        Message, Usage, LLMRequest, LLMResponse, LLMClient (ABC)
     deepseek.py    DeepSeek adapter over the openai SDK
@@ -271,6 +282,32 @@ Only `passed=False` starts another attempt, and once the budget is spent the
 method raises `RetryError` carrying the last reason. Worker, registry and
 evaluator errors propagate unchanged instead of turning into a retry, the plan
 is never re-planned, and the aggregator is not called automatically.
+
+### Phase 4F pipeline
+
+```python
+from orchestrator_worker.aggregators import LLMAggregator
+from orchestrator_worker.evaluators import LLMEvaluator
+from orchestrator_worker.planner import LLMPlanner
+
+orchestrator = Orchestrator(
+    registry,
+    planner=LLMPlanner(client, available_workers=registry.names()),
+    evaluator=LLMEvaluator(client),
+    aggregator=LLMAggregator(client),
+)
+
+answer = orchestrator.run_pipeline("research asyncio and write a small example")
+print(answer)
+```
+
+`run_pipeline()` is the explicit end-to-end flow: it calls `plan()` once, hands
+that same `Plan` to `execute_plan_with_retry()`, and aggregates only the
+`ExecutionContext` that passed evaluation. The planner is never re-invoked, no
+attempt is aggregated more than once, and errors (`PlannerError`,
+`WorkerError`, `RegistryError`, `EvaluatorError`, `RetryError`,
+`AggregatorError`, `OrchestratorError`) propagate unchanged. `run()` still works
+exactly as before.
 
 ## Tests
 
