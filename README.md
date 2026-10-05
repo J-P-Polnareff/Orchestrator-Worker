@@ -7,11 +7,12 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 5C-2 (LLM tool-call contract)**. The provider-neutral
-tool layer now has a matching LLM contract: requests can carry `Tool`
-definitions, responses carry parsed `ToolCall` objects, and assistant/tool
-messages are representable. The flow below is unchanged and nothing executes a
-tool yet.
+Current status: **Phase 5C-3 (tool execution loop)**. On top of the
+provider-neutral tool layer and the LLM tool-call contract, a standalone
+`ToolLoop` now drives `LLM -> ToolCall -> ToolExecutor -> ToolResult -> LLM`
+until the model stops requesting tools. It is bounded by `max_rounds` and runs
+tools sequentially; the flow below is unchanged and the loop is not yet wired
+into a worker or the orchestrator.
 
 Routing - `Orchestrator.run(task, worker_name=...)`:
 
@@ -111,6 +112,7 @@ src/orchestrator_worker/
                    run_pipeline() chains the full plan/execute/aggregate flow
   application.py   build_orchestrator(): concrete wiring for a ready Orchestrator
   tools.py         Tool / ToolCall / ToolResult + ToolRegistry and ToolExecutor
+  tool_loop.py     ToolLoop: LLM <-> ToolExecutor until the model stops
   llm/
     base.py        Message (tool calls/results), LLMRequest (tools),
                    LLMResponse (tool_calls), Usage, LLMClient (ABC)
@@ -415,9 +417,39 @@ handler) and parses `message.tool_calls` back into `ToolCall` objects, requiring
 tool types, malformed JSON and non-object JSON all raise `LLMError` instead of
 being repaired, and no provider SDK object leaves the adapter.
 
-Still out of scope: there is no tool-execution loop, no automatic tool
-execution, no worker tool integration and no MCP. Executing a `ToolCall` and
-feeding the `ToolResult` back to the model is the next step.
+The execution loop itself now lives in `tool_loop.py` (Phase 5C-3); still out of
+scope here are worker integration, orchestrator integration and MCP.
+
+### Phase 5C-3 Tool execution loop
+
+```python
+from orchestrator_worker.llm import LLMRequest, Message
+from orchestrator_worker.tool_loop import ToolLoop
+from orchestrator_worker.tools import ToolExecutor
+
+loop = ToolLoop(llm_client, ToolExecutor(registry), max_rounds=8)
+response = loop.run(
+    LLMRequest(messages=[Message.user("add 1 and 2")], tools=(calculator,))
+)
+response.content   # final answer, once the model stops calling tools
+```
+
+`ToolLoop` is a standalone runtime component, not part of a worker or the
+orchestrator. One round is one `LLMClient.complete()` call: a response without
+tool calls is returned as-is, otherwise the loop appends an assistant tool-call
+message plus one tool message per result and calls the model again with the same
+`tools` and a longer history. Several tool calls in one response run strictly
+sequentially, in response order - there is no async or parallel execution.
+
+`max_rounds` (default 8) bounds the number of model calls; a tool call that
+arrives in the last permitted round raises `ToolLoopError` before its result
+could ever reach the model. A failing tool (`ToolExecutionError`) becomes an
+`is_error=True` tool message so the model can react, while an unknown tool
+(`ToolRegistryError`) and an `LLMError` propagate unchanged: the loop never
+retries the model, never replans and never triggers the Orchestrator retry.
+
+Still out of scope: no worker tool integration, no orchestrator integration, no
+`tool_choice` and no MCP.
 
 ## Tests
 
