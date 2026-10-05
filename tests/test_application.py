@@ -114,7 +114,12 @@ def build_pipeline_client() -> SequenceLLMClient:
             fake_response(PLANNER_JSON),
             fake_response("asyncio is a library for concurrent code."),
             fake_response("import asyncio\n\nasync def main(): ..."),
-            fake_response('{"passed": true, "reason": "results look complete"}'),
+            fake_response(
+                '{"passed": true, "reason": "results look complete", '
+                '"step_evaluations": ['
+                '{"step_id": "step_1", "passed": true, "feedback": ""}, '
+                '{"step_id": "step_2", "passed": true, "feedback": ""}]}'
+            ),
             fake_response("FINAL ANSWER"),
         ]
     )
@@ -224,7 +229,9 @@ def build_tool_pipeline_client() -> SequenceLLMClient:
             ),
             fake_response("17 x 23 = 391."),
             fake_response(
-                '{"passed": true, "reason": "the calculator result supports it"}'
+                '{"passed": true, "reason": "the calculator result supports it", '
+                '"step_evaluations": ['
+                '{"step_id": "research-1", "passed": true, "feedback": ""}]}'
             ),
             fake_response("17 x 23 = 391."),
         ]

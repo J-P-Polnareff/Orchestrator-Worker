@@ -64,8 +64,27 @@ def single_step_context() -> ExecutionContext:
     )
 
 
-def verdict(passed: bool = True, reason: str = "the results are enough") -> str:
-    return json.dumps({"passed": passed, "reason": reason})
+def verdict(
+    passed: bool = True,
+    reason: str = "the results are enough",
+    step_ids: tuple[str, ...] = ("step_1",),
+    failed_step_ids: tuple[str, ...] = (),
+) -> str:
+    step_evaluations = [
+        {
+            "step_id": step_id,
+            "passed": step_id not in failed_step_ids,
+            "feedback": "" if step_id not in failed_step_ids else "not satisfied",
+        }
+        for step_id in step_ids
+    ]
+    return json.dumps(
+        {
+            "passed": passed,
+            "reason": reason,
+            "step_evaluations": step_evaluations,
+        }
+    )
 
 
 def imports_of(path: pathlib.Path) -> list[str]:
@@ -146,7 +165,7 @@ def test_verdict_does_not_use_json_mode():
 
 
 def test_prompt_contains_the_goal_steps_and_outputs():
-    llm = FakeLLMClient(fake_response(verdict()))
+    llm = FakeLLMClient(fake_response(verdict(step_ids=("step_1", "step_2"))))
     context = build_context(
         "study asyncio",
         [
@@ -174,7 +193,7 @@ def test_prompt_contains_the_goal_steps_and_outputs():
 
 
 def test_prompt_follows_plan_order_even_when_results_are_shuffled():
-    llm = FakeLLMClient(fake_response(verdict()))
+    llm = FakeLLMClient(fake_response(verdict(step_ids=("step_1", "step_2", "step_3"))))
     context = build_context(
         "a goal",
         [

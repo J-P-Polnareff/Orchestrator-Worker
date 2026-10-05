@@ -35,7 +35,11 @@ def test_evaluation_result_is_frozen():
 
 
 def test_evaluation_result_is_a_dataclass_with_the_expected_fields():
-    assert EvaluationResult.__dataclass_fields__.keys() == {"passed", "reason"}
+    assert EvaluationResult.__dataclass_fields__.keys() == {
+        "passed",
+        "reason",
+        "step_evaluations",
+    }
 
 
 @pytest.mark.parametrize("value", [1, 0, "true", "yes", None, []])
