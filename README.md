@@ -7,12 +7,12 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 5C-4A (tool-enabled worker boundary)**. On top of the
-tool execution loop, a `ToolEnabledWorker` now holds its own allowed `Tool`
-definitions and runs a task through an injected `ToolLoop`, turning the final
-`LLMResponse` back into a worker result. The loop stays the only tool runtime
-entry point, and the flow below is unchanged: no existing worker, the
-orchestrator or the application is wired to tools yet.
+Current status: **Phase 5C-4B (tool-enabled research worker)**. The
+application composition root now wires a real tool runtime: a built-in
+`calculator` tool in a `ToolRegistry`, executed through a `ToolExecutor` and
+offered to `ResearchToolWorker` (registered as `"research"`) through one shared
+`ToolLoop`. `ResearchWorker` and `CodingWorker` are unchanged and the pipeline
+flow below is unchanged.
 
 Routing - `Orchestrator.run(task, worker_name=...)`:
 
@@ -112,6 +112,7 @@ src/orchestrator_worker/
                    run_pipeline() chains the full plan/execute/aggregate flow
   application.py   build_orchestrator(): concrete wiring for a ready Orchestrator
   tools.py         Tool / ToolCall / ToolResult + ToolRegistry and ToolExecutor
+  builtin_tools.py calculator: the first built-in, provider-neutral Tool
   tool_loop.py     ToolLoop: LLM <-> ToolExecutor until the model stops
   llm/
     base.py        Message (tool calls/results), LLMRequest (tools),
@@ -127,6 +128,7 @@ src/orchestrator_worker/
     research.py    ResearchWorker, a single LLM call with no tools
     coding.py      CodingWorker, coding-oriented prompt, no code execution
     tool_enabled.py  ToolEnabledWorker: Worker <-> ToolLoop boundary
+    research_tool.py  ResearchToolWorker: tool-enabled research worker
 tests/             unit tests (network-free)
 ```
 ## Setup
@@ -477,8 +479,35 @@ prompt (`name`, `system_prompt`, or a full `build_request` override); the base
 class handles the tool wiring and the `LLMResponse` -> `str` conversion.
 `ResearchWorker` and `CodingWorker` are untouched and stay tool-free.
 
-Still out of scope: no concrete research/coding tool worker, no orchestrator
-wiring and no application wiring - that is Phase 5C-4B.
+### Phase 5C-4B Tool-enabled research worker
+
+`ResearchToolWorker` is the first concrete tool-enabled worker. It keeps the
+worker name `"research"`, so the planner contract does not change, and it only
+supplies its prompt; the loop does the rest.
+
+```python
+from orchestrator_worker.application import build_orchestrator
+
+orchestrator = build_orchestrator()      # the calculator is wired for you
+answer = orchestrator.run_pipeline("compute 17 x 23")
+```
+
+The composition root creates the built-in `calculator` tool, registers it in a
+`ToolRegistry`, runs it through a `ToolExecutor` and offers it to
+`ResearchToolWorker` through one shared `ToolLoop`:
+
+```
+LLMClient -> ToolRegistry -> ToolExecutor -> ToolLoop -> ResearchToolWorker
+                                                       -> WorkerRegistry["research"]
+```
+
+`ResearchToolWorker` receives the loop plus the allow-list `(calculator,)`; it
+never sees the registry and never executes a tool itself. `CodingWorker` stays
+tool-free, `ResearchWorker` is untouched, and the planner still lists only
+`["coding", "research"]`.
+
+Still out of scope: no real DeepSeek tool-call smoke test, no coding tool
+worker, no parallel tools and no MCP.
 
 ## Tests
 

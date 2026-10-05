@@ -1019,7 +1019,6 @@ def test_tool_loop_uses_no_concurrency_imports(token):
     "module_name",
     [
         "orchestrator_worker.orchestrator",
-        "orchestrator_worker.application",
         "orchestrator_worker.tools",
         "orchestrator_worker.retry",
         "orchestrator_worker.plan",
@@ -1044,6 +1043,12 @@ def test_tool_loop_uses_no_concurrency_imports(token):
 )
 def test_no_production_module_imports_the_tool_loop(module_name):
     assert not any("tool_loop" in name for name in _imports_of(module_name))
+
+
+def test_the_composition_root_is_the_one_module_that_wires_the_tool_loop():
+    # Phase 5C-4B: the application composition root is allowed to build the
+    # loop; every other agent-layer module still must not import it.
+    assert ".tool_loop" in _imports_of("orchestrator_worker.application")
 
 
 def test_the_tool_loop_tests_never_import_a_provider_sdk():
