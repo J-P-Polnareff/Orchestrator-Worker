@@ -7,9 +7,10 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 5A (application composition root)**. `build_orchestrator()`
-assembles the concrete components into a ready `Orchestrator`; the flow below is
-unchanged.
+Current status: **Phase 5C-1 (tool foundation)**. `build_orchestrator()` assembles
+the concrete components into a ready `Orchestrator`, and a provider-neutral tool
+layer (`Tool` / `ToolRegistry` / `ToolExecutor`) exists alongside it. The flow
+below is unchanged and no tool calling is wired in yet.
 
 Routing - `Orchestrator.run(task, worker_name=...)`:
 
@@ -108,6 +109,7 @@ src/orchestrator_worker/
   orchestrator.py  run() routes, plan() plans, execute_plan() runs a plan,
                    run_pipeline() chains the full plan/execute/aggregate flow
   application.py   build_orchestrator(): concrete wiring for a ready Orchestrator
+  tools.py         Tool / ToolCall / ToolResult + ToolRegistry and ToolExecutor
   llm/
     base.py        Message, Usage, LLMRequest, LLMResponse, LLMClient (ABC)
     deepseek.py    DeepSeek adapter over the openai SDK
@@ -332,6 +334,48 @@ never plans, executes or calls a model, so building is side-effect free.
 `orchestrator.py` still imports no concrete provider or worker; only this module
 depends on concrete implementations. Phase 5A does not add provider routing, a
 Claude adapter, real-API integration tests or tool calling.
+
+### Phase 5C-1 tool foundation
+
+```python
+from orchestrator_worker.tools import Tool, ToolCall, ToolExecutor, ToolRegistry
+
+def add(args):            # handler: any callable over the parsed arguments
+    return args["a"] + args["b"]
+
+calculator = Tool(
+    name="calculator",
+    description="Perform a simple arithmetic operation.",
+    parameters={
+        "type": "object",
+        "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+        "required": ["a", "b"],
+    },
+    handler=add,
+)
+
+registry = ToolRegistry()
+registry.register(calculator)
+
+executor = ToolExecutor(registry)
+result = executor.execute(
+    ToolCall(id="call-1", name="calculator", arguments={"a": 1, "b": 2})
+)
+print(result.output, result.is_error)     # "3 False"
+```
+
+`Tool`, `ToolCall` and `ToolResult` are frozen, validated, provider-neutral data
+objects; `parameters` is stored as a plain mapping and is not schema-validated
+yet. `ToolRegistry` rejects duplicate names, never falls back on an unknown
+lookup, and returns sorted names plus a read-only tuple of tools. `ToolExecutor`
+resolves the tool by name, calls `handler(arguments)` and normalizes the result
+with `str()`; an unknown tool raises `ToolRegistryError` and a handler failure
+raises `ToolExecutionError` with the original exception as `__cause__`.
+
+This layer is deliberately not connected to the model yet: there is no LLM tool
+calling, no tool loop, and no change to `LLMClient`, the workers, the planner,
+the evaluator, the aggregator or the orchestrator. Offering tools to a provider
+and driving the call/execute cycle from a model response is the next step.
 
 ## Tests
 
