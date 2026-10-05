@@ -4,8 +4,11 @@ Flow::
 
     task -> prompt -> LLMClient.complete -> JSON text -> parse -> validate -> Plan
 
-It depends on the ``LLMClient`` abstraction and on a read-only list of worker
-names. It never touches the worker registry and never executes a worker.
+It depends on the ``LLMClient`` abstraction and on a read-only view of the
+available workers: their names plus the capability each one declares. It never
+touches the worker registry, never executes a worker, and it never chooses a
+worker itself - that decision belongs to the model, which only has to pick from
+the declared capabilities.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping, Sequence
 
+from ..capability import WorkerCapability
 from ..llm import LLMClient, LLMError, LLMRequest, LLMResponse, Message
 from ..plan import Plan, PlanError, PlanStep
 from .base import (
@@ -43,6 +47,9 @@ DEFAULT_SYSTEM_PROMPT = (
     '- "id" is a unique non-empty string such as "step_1".\n'
     '- "task" is a non-empty string describing the work of that step.\n'
     '- "worker_name" must be one of the available workers listed above.\n'
+    "- Choose the worker whose declared capability best matches the step's task.\n"
+    "- Do not invent worker names and do not assume any capability beyond the "
+    "ones listed above.\n"
     "- Plan only. Never execute the task and never report execution results.\n"
     "\n"
     "Example:\n"
@@ -57,15 +64,17 @@ class LLMPlanner(Planner):
     def __init__(
         self,
         llm: LLMClient,
-        available_workers: Sequence[str],
+        available_workers: Sequence[str | WorkerCapability],
         *,
         system_prompt: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> None:
         self._llm = llm
-        self._available_workers = tuple(sorted(_clean_worker_names(available_workers)))
+        names, descriptions = _clean_workers(available_workers)
+        self._available_workers = tuple(sorted(names))
         self._available = frozenset(self._available_workers)
+        self._descriptions = descriptions
         self._temperature = temperature
         self._max_tokens = max_tokens
 
@@ -78,6 +87,7 @@ class LLMPlanner(Planner):
     def available_workers(self) -> tuple[str, ...]:
         """The worker names this planner is allowed to reference."""
         return self._available_workers
+
     def create_plan(self, task: str) -> Plan:
         """Ask the LLM for a plan and return the validated result."""
         task = (task or "").strip()
@@ -99,10 +109,21 @@ class LLMPlanner(Planner):
         return self._parse_plan(response.content)
 
     def _describe_workers(self) -> str:
-        """Bullet list used inside the prompt."""
+        """Bullet list used inside the prompt.
+
+        Each worker is one bullet; when the planner was given a
+        :class:`WorkerCapability`, its description follows on the next line so
+        the model sees what the worker actually declares.
+        """
         if not self._available_workers:
             return "- (none)"
-        return "\n".join(f"- {name}" for name in self._available_workers)
+        lines: list[str] = []
+        for name in self._available_workers:
+            lines.append(f"- {name}")
+            description = self._descriptions.get(name)
+            if description:
+                lines.append(f"  Capability: {description}")
+        return "\n".join(lines)
 
     def _worker_summary(self) -> str:
         """Inline list used inside error messages."""
@@ -194,12 +215,25 @@ class LLMPlanner(Planner):
         return text
 
 
-def _clean_worker_names(names: Sequence[str]) -> set[str]:
-    cleaned: set[str] = set()
-    for name in names:
-        if not isinstance(name, str) or not name.strip():
+def _clean_workers(
+    workers: Sequence[str | WorkerCapability],
+) -> tuple[set[str], dict[str, str]]:
+    """Split worker names from optional capability descriptions.
+
+    Plain names stay name-only; a :class:`WorkerCapability` contributes both its
+    name and its description. Duplicate names collapse to one entry.
+    """
+    names: set[str] = set()
+    descriptions: dict[str, str] = {}
+    for worker in workers:
+        if isinstance(worker, WorkerCapability):
+            names.add(worker.name)
+            descriptions[worker.name] = worker.description
+        elif isinstance(worker, str) and worker.strip():
+            names.add(worker.strip())
+        else:
             raise ValueError(
-                f"available worker names must be non-empty strings, got {name!r}."
+                "available workers must be non-empty strings or "
+                f"WorkerCapability objects, got {worker!r}."
             )
-        cleaned.add(name.strip())
-    return cleaned
+    return names, descriptions

@@ -7,12 +7,13 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 5C-4B (tool-enabled research worker)**. The
-application composition root now wires a real tool runtime: a built-in
-`calculator` tool in a `ToolRegistry`, executed through a `ToolExecutor` and
-offered to `ResearchToolWorker` (registered as `"research"`) through one shared
-`ToolLoop`. `ResearchWorker` and `CodingWorker` are unchanged and the pipeline
-flow below is unchanged.
+Current status: **Phase 5D (worker capability awareness)**. Every worker now
+declares a `WorkerCapability` (a name plus a description), `WorkerRegistry` is
+the single source of truth for those capabilities, and the planner is built
+from `registry.capabilities()` so its prompt shows the model what each worker
+can do. Routing is still deterministic: the model picks a `worker_name`, the
+router resolves exactly that name, and nothing re-routes or falls back. Tool
+calling (Phase 5C) and the pipeline flow below are unchanged.
 
 Routing - `Orchestrator.run(task, worker_name=...)`:
 
@@ -96,6 +97,7 @@ per-step retry, no automatic aggregation and no parallel execution.
 src/orchestrator_worker/
   config.py        env / .env -> immutable Settings
   state.py         AgentState shared across the pipeline
+  capability.py    WorkerCapability: the name + description a worker declares
   plan.py          Plan / PlanStep data model
   execution.py     ExecutionResult: a plan step plus the state it produced
   context.py       ExecutionContext: a plan plus its complete result set
@@ -121,10 +123,10 @@ src/orchestrator_worker/
     factory.py     provider registry -> build_llm_client()
   planner/
     base.py        Planner contract + planner errors
-    llm.py         LLMPlanner: prompt -> JSON -> validated Plan
+    llm.py         LLMPlanner: capability-aware prompt -> JSON -> validated Plan
   workers/
-    base.py        BaseWorker contract + WorkerError
-    registry.py    WorkerRegistry, maps worker names to worker instances
+    base.py        BaseWorker contract (+ capability) + WorkerError
+    registry.py    WorkerRegistry: name -> worker, plus the capability inventory
     research.py    ResearchWorker, a single LLM call with no tools
     coding.py      CodingWorker, coding-oriented prompt, no code execution
     tool_enabled.py  ToolEnabledWorker: Worker <-> ToolLoop boundary
@@ -506,8 +508,38 @@ never sees the registry and never executes a tool itself. `CodingWorker` stays
 tool-free, `ResearchWorker` is untouched, and the planner still lists only
 `["coding", "research"]`.
 
-Still out of scope: no real DeepSeek tool-call smoke test, no coding tool
-worker, no parallel tools and no MCP.
+The real DeepSeek tool-call smoke test lives in
+`scripts/smoke_test_tool_call.py` and is run manually, never by pytest. Still
+out of scope: no coding tool worker, no parallel tools and no MCP.
+
+### Phase 5D Worker capability awareness
+
+Every worker declares a lightweight, provider-neutral `WorkerCapability` - a
+name plus a short description of what the worker can do:
+
+```python
+from orchestrator_worker.workers import CodingWorker, WorkerRegistry
+
+registry = WorkerRegistry()
+registry.register(CodingWorker(llm))
+registry.capabilities()   # [WorkerCapability(name="coding", description="...")]
+```
+
+`BaseWorker` derives the capability from its `name` and
+`capability_description`, so a concrete worker only overrides that class
+attribute. Registering a worker is the only step needed to make its capability
+visible: `WorkerRegistry` reads the capability off the worker it holds, so there
+is no second capability list that could drift out of sync.
+
+The planner receives that inventory
+(`LLMPlanner(client, available_workers=registry.capabilities())`) and renders
+each worker together with its declared capability in the prompt. The model still
+chooses the `worker_name` and the deterministic router still resolves exactly
+that name - there is no keyword, fuzzy or similarity matching and no fallback.
+Plain worker names are still accepted, so existing constructions keep working.
+
+Still out of scope: no re-planning, no DAG, no memory or checkpointing and no
+embedding- or similarity-based routing.
 
 ## Tests
 

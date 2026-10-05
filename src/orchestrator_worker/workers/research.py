@@ -15,11 +15,17 @@ DEFAULT_SYSTEM_PROMPT = (
     "say so explicitly instead of inventing details."
 )
 
+CAPABILITY_DESCRIPTION = (
+    "Performs research, factual analysis, information synthesis, and general "
+    "investigation."
+)
+
 
 class ResearchWorker(BaseWorker):
     """Produces a written answer for a research-style task."""
 
     name = "research"
+    capability_description = CAPABILITY_DESCRIPTION
 
     def __init__(
         self,

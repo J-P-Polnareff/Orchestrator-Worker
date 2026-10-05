@@ -18,11 +18,17 @@ DEFAULT_SYSTEM_PROMPT = (
     "explicitly instead of inventing it."
 )
 
+CAPABILITY_DESCRIPTION = (
+    "Handles software development tasks including code implementation, "
+    "debugging, code analysis, and technical problem solving."
+)
+
 
 class CodingWorker(BaseWorker):
     """Produces coding-oriented guidance for a task."""
 
     name = "coding"
+    capability_description = CAPABILITY_DESCRIPTION
 
     def __init__(
         self,

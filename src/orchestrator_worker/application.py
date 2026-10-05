@@ -9,6 +9,11 @@ plans, routes, executes, evaluates, aggregates or calls a model itself.
 The ``"research"`` worker is tool-enabled: it receives a shared ``ToolLoop``
 plus its own allow-list of ``Tool`` definitions. The tool-free ``"coding"``
 worker uses the same client directly.
+
+The planner is capability-aware: it receives ``registry.capabilities()``, so
+the prompt lists each registered worker together with the capability the worker
+itself declares. Registering another worker is enough to make its capability
+visible to the planner - nothing else has to be updated.
 """
 
 from __future__ import annotations
@@ -40,6 +45,9 @@ def build_orchestrator(llm: LLMClient | None = None) -> Orchestrator:
     single shared :class:`ToolLoop`. The worker gets its own allow-list, never
     the registry.
 
+    The planner is built from ``registry.capabilities()`` rather than from bare
+    worker names, so its prompt shows the model what each worker can do.
+
     Building performs no work: no plan is made, no worker runs and the model is
     never called.
     """
@@ -54,7 +62,7 @@ def build_orchestrator(llm: LLMClient | None = None) -> Orchestrator:
     registry.register(ResearchToolWorker(tool_loop, tools=(calculator,)))
     registry.register(CodingWorker(client))
 
-    planner = LLMPlanner(client, available_workers=registry.names())
+    planner = LLMPlanner(client, available_workers=registry.capabilities())
     evaluator = LLMEvaluator(client)
     aggregator = LLMAggregator(client)
 

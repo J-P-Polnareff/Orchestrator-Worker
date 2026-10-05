@@ -25,9 +25,15 @@ DEFAULT_SYSTEM_PROMPT = (
     "answer the task asks for."
 )
 
+CAPABILITY_DESCRIPTION = (
+    "Performs research, factual analysis, information synthesis, and general "
+    "investigation. Can use the calculator tool for arithmetic."
+)
+
 
 class ResearchToolWorker(ToolEnabledWorker):
     """A research worker whose task runs through an injected ``ToolLoop``."""
 
     name = "research"
+    capability_description = CAPABILITY_DESCRIPTION
     system_prompt = DEFAULT_SYSTEM_PROMPT

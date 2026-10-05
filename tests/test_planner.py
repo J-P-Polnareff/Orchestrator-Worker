@@ -387,7 +387,7 @@ def test_llm_planner_imports_only_the_expected_modules():
             imported.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             imported.append("." * node.level + (node.module or ""))
-    assert imported == ["__future__", "json", "typing", "..llm", "..plan", ".base"]
+    assert imported == ["__future__", "json", "typing", "..capability", "..llm", "..plan", ".base"]
 
 
 def test_planner_base_imports_only_the_expected_modules():
