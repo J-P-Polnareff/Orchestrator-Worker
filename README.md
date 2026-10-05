@@ -7,13 +7,14 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 5D (worker capability awareness)**. Every worker now
-declares a `WorkerCapability` (a name plus a description), `WorkerRegistry` is
-the single source of truth for those capabilities, and the planner is built
-from `registry.capabilities()` so its prompt shows the model what each worker
-can do. Routing is still deterministic: the model picks a `worker_name`, the
-router resolves exactly that name, and nothing re-routes or falls back. Tool
-calling (Phase 5C) and the pipeline flow below are unchanged.
+Current status: **Phase 5E (step-aware evaluation and targeted retry)**. Every
+worker declares a `WorkerCapability` (a name plus a description),
+`WorkerRegistry` is the single source of truth for those capabilities, and the
+planner is built from `registry.capabilities()` so its prompt shows the model
+what each worker can do. Routing is still deterministic: the model picks a
+`worker_name`, the router resolves exactly that name, and nothing re-routes or
+falls back. Tool calling (Phase 5C) is unchanged; retry is now step-aware - the
+evaluator names the failed steps and only those are re-executed.
 
 Routing - `Orchestrator.run(task, worker_name=...)`:
 
@@ -51,8 +52,8 @@ Retry - `Orchestrator.execute_plan_with_retry(plan, max_retries=...)`:
 
 ```
 Plan -> execute -> evaluate -> passed? -> ExecutionContext
-                            -> failed? -> execute the whole plan again
-                            -> budget spent? -> RetryError
+                            -> failed? -> re-execute only the failed steps
+                            -> no failed step or budget spent? -> RetryError
 ```
 
 Pipeline - `Orchestrator.run_pipeline(task, max_retries=...)`:
@@ -77,11 +78,11 @@ returns the same results wrapped in an `ExecutionContext`, and `aggregate()`
 turns that context into the final answer. Execution is strictly sequential and
 aggregation only runs once every step has finished. Evaluation exists as a
 standalone component (`Evaluator` / `LLMEvaluator`), and
-`execute_plan_with_retry()` re-runs the whole plan when the evaluator reports
-`passed=False`. `run_pipeline()` chains these layers explicitly - plan once,
-execute with retry, then aggregate only the context that passed - while `run()`
-keeps its original single-worker behaviour. There is no replanning, no targeted
-per-step retry, no automatic aggregation and no parallel execution.
+`execute_plan_with_retry()` re-runs only the steps the evaluator marked as
+failed when it reports `passed=False`. `run_pipeline()` chains these layers
+explicitly - plan once, execute with targeted retry, then aggregate only the
+context that passed - while `run()` keeps its original single-worker behaviour.
+There is no replanning, no whole-plan retry fallback and no parallel execution.
 
 ## Design constraints
 
@@ -258,8 +259,8 @@ answer from results that already exist. It never plans, routes, executes or
 retries anything, and it lays the steps out in `plan` order regardless of how
 `context.results` happens to be ordered. It reaches the model only through
 `LLMClient`, so the aggregation model can be swapped without touching the
-aggregator logic. Retry, parallel execution and tool calling are still out of
-scope.
+aggregator logic. The aggregator itself never retries, and parallel execution is
+still out of scope.
 
 ### Phase 4E evaluation and retry
 
@@ -278,7 +279,7 @@ answer, plus a reason. It lays the steps out in `plan` order, reaches the model
 only through `LLMClient`, and never plans, executes, retries or modifies the
 context. It is a separate component from the aggregator.
 
-#### Evaluator-driven retry
+#### Evaluator-driven targeted retry
 
 ```python
 orchestrator = Orchestrator(registry, evaluator=LLMEvaluator(client))
@@ -286,14 +287,16 @@ orchestrator = Orchestrator(registry, evaluator=LLMEvaluator(client))
 context = orchestrator.execute_plan_with_retry(plan, max_retries=1)
 ```
 
-`max_retries` counts the extra attempts after the first execution, so
-`max_retries=1` runs the plan at most twice. Every attempt re-executes the
-whole plan from scratch and re-evaluates it; an individual step is never
-retried on its own, because an `EvaluationResult` carries no failing step id.
-Only `passed=False` starts another attempt, and once the budget is spent the
-method raises `RetryError` carrying the last reason. Worker, registry and
-evaluator errors propagate unchanged instead of turning into a retry, the plan
-is never re-planned, and the aggregator is not called automatically.
+`max_retries` counts the targeted retry rounds after the first execution, so
+`max_retries=1` allows one round. The plan runs once, then the evaluator reports
+which steps failed (`EvaluationResult.failed_step_ids`); only those steps are
+re-executed, in plan order and through the same `execute_step()` primitive the
+initial loop uses, and the updated context is evaluated once more. Steps that
+passed keep their result. A failure that cannot be tied to a step
+(`failed_step_ids` is empty) is not retried at all: it raises `RetryError`
+instead of re-running the whole plan. Worker, registry and evaluator errors
+propagate unchanged instead of turning into a retry, the plan is never
+re-planned, and the aggregator is not called automatically.
 
 ### Phase 4F pipeline
 

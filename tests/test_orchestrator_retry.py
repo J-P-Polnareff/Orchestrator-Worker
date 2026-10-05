@@ -17,7 +17,11 @@ from fakes import (
     StubWorker,
 )
 from orchestrator_worker.context import ExecutionContext
-from orchestrator_worker.evaluation import EvaluationError, EvaluationResult
+from orchestrator_worker.evaluation import (
+    EvaluationError,
+    EvaluationResult,
+    StepEvaluation,
+)
 from orchestrator_worker.evaluators import EvaluatorError
 from orchestrator_worker.orchestrator import Orchestrator, OrchestratorError
 from orchestrator_worker.plan import Plan, PlanStep
@@ -40,8 +44,16 @@ def build_registry(*workers) -> WorkerRegistry:
     return registry
 
 
-def failed(reason: str) -> EvaluationResult:
-    return EvaluationResult(passed=False, reason=reason)
+def failed(reason: str, *step_ids: str) -> EvaluationResult:
+    """A failing verdict, optionally naming the steps that must be retried."""
+    return EvaluationResult(
+        passed=False,
+        reason=reason,
+        step_evaluations=tuple(
+            StepEvaluation(step_id=step_id, passed=False, feedback=reason)
+            for step_id in step_ids
+        ),
+    )
 
 
 def test_passing_evaluation_executes_and_evaluates_once():
@@ -62,7 +74,9 @@ def test_passing_evaluation_executes_and_evaluates_once():
 
 def test_default_max_retries_allows_one_extra_attempt():
     log: list[str] = []
-    evaluator = RecordingEvaluator([failed("try again"), EvaluationResult(True, "ok")])
+    evaluator = RecordingEvaluator(
+        [failed("try again", "step_1"), EvaluationResult(True, "ok")]
+    )
     orchestrator = Orchestrator(
         build_registry(RecordingWorker("research", log)), evaluator=evaluator
     )
@@ -76,7 +90,7 @@ def test_default_max_retries_allows_one_extra_attempt():
 
 def test_max_retries_zero_fails_after_a_single_attempt():
     log: list[str] = []
-    evaluator = RecordingEvaluator([failed("not enough")])
+    evaluator = RecordingEvaluator([failed("not enough", "step_1")])
     orchestrator = Orchestrator(
         build_registry(RecordingWorker("research", log)), evaluator=evaluator
     )
@@ -94,7 +108,10 @@ def test_max_retries_zero_fails_after_a_single_attempt():
 def test_retry_until_pass_with_max_retries_one():
     log: list[str] = []
     evaluator = RecordingEvaluator(
-        [failed("first try failed"), EvaluationResult(True, "second try worked")]
+        [
+            failed("first try failed", "step_1"),
+            EvaluationResult(True, "second try worked"),
+        ]
     )
     orchestrator = Orchestrator(
         build_registry(RecordingWorker("research", log)), evaluator=evaluator
@@ -111,7 +128,11 @@ def test_retry_until_pass_with_max_retries_one():
 def test_max_retries_two_allows_three_attempts():
     log: list[str] = []
     evaluator = RecordingEvaluator(
-        [failed("one"), failed("two"), EvaluationResult(True, "three")]
+        [
+            failed("one", "step_1"),
+            failed("two", "step_1"),
+            EvaluationResult(True, "three"),
+        ]
     )
     orchestrator = Orchestrator(
         build_registry(RecordingWorker("research", log)), evaluator=evaluator
@@ -127,7 +148,13 @@ def test_max_retries_two_allows_three_attempts():
 
 def test_exhausted_budget_raises_retry_error_with_the_last_reason():
     log: list[str] = []
-    evaluator = RecordingEvaluator([failed("one"), failed("two"), failed("three")])
+    evaluator = RecordingEvaluator(
+        [
+            failed("one", "step_1"),
+            failed("two", "step_1"),
+            failed("three", "step_1"),
+        ]
+    )
     orchestrator = Orchestrator(
         build_registry(RecordingWorker("research", log)), evaluator=evaluator
     )
@@ -276,11 +303,13 @@ def test_registry_errors_propagate_without_retry():
     assert evaluator.calls == []
 
 
-def test_every_attempt_reruns_every_step():
+def test_only_the_failed_step_is_re_executed():
     log: list[str] = []
     research = RecordingWorker("research", log)
     coding = RecordingWorker("coding", log)
-    evaluator = RecordingEvaluator([failed("again"), EvaluationResult(True, "ok")])
+    evaluator = RecordingEvaluator(
+        [failed("again", "step_2"), EvaluationResult(True, "ok")]
+    )
     orchestrator = Orchestrator(
         build_registry(research, coding), evaluator=evaluator
     )
@@ -291,15 +320,17 @@ def test_every_attempt_reruns_every_step():
 
     orchestrator.execute_plan_with_retry(plan, max_retries=1)
 
-    assert log == ["research", "coding", "research", "coding"]
-    assert research.calls == ["study asyncio", "study asyncio"]
+    assert log == ["research", "coding", "coding"]
+    assert research.calls == ["study asyncio"]
     assert coding.calls == ["write an example", "write an example"]
 
 
 def test_retry_does_not_call_the_planner_and_keeps_the_plan():
     log: list[str] = []
     planner = SpyPlanner()
-    evaluator = RecordingEvaluator([failed("again"), EvaluationResult(True, "ok")])
+    evaluator = RecordingEvaluator(
+        [failed("again", "step_1"), EvaluationResult(True, "ok")]
+    )
     orchestrator = Orchestrator(
         build_registry(RecordingWorker("research", log)),
         planner=planner,
@@ -319,7 +350,9 @@ def test_retry_does_not_call_the_planner_and_keeps_the_plan():
 
 def test_each_attempt_builds_fresh_contexts_results_and_states():
     log: list[str] = []
-    evaluator = RecordingEvaluator([failed("again"), EvaluationResult(True, "ok")])
+    evaluator = RecordingEvaluator(
+        [failed("again", "step_1"), EvaluationResult(True, "ok")]
+    )
     orchestrator = Orchestrator(
         build_registry(RecordingWorker("research", log)), evaluator=evaluator
     )
@@ -338,7 +371,9 @@ def test_retry_reuses_the_registry_lookup_per_attempt():
     log: list[str] = []
     registry = SpyRegistry()
     registry.register(RecordingWorker("research", log))
-    evaluator = RecordingEvaluator([failed("again"), EvaluationResult(True, "ok")])
+    evaluator = RecordingEvaluator(
+        [failed("again", "step_1"), EvaluationResult(True, "ok")]
+    )
     orchestrator = Orchestrator(registry, evaluator=evaluator)
     plan = build_plan(step("step_1", "study asyncio", "research"))
 

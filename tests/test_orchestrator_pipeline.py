@@ -24,7 +24,11 @@ from fakes import (
 )
 from orchestrator_worker.aggregators import AggregatorError
 from orchestrator_worker.context import ExecutionContext
-from orchestrator_worker.evaluation import EvaluationError, EvaluationResult
+from orchestrator_worker.evaluation import (
+    EvaluationError,
+    EvaluationResult,
+    StepEvaluation,
+)
 from orchestrator_worker.evaluators import EvaluatorError
 from orchestrator_worker.orchestrator import Orchestrator, OrchestratorError
 from orchestrator_worker.plan import Plan, PlanStep
@@ -52,8 +56,16 @@ def passed() -> EvaluationResult:
     return EvaluationResult(passed=True, reason="ok")
 
 
-def failed(reason: str) -> EvaluationResult:
-    return EvaluationResult(passed=False, reason=reason)
+def failed(reason: str, *step_ids: str) -> EvaluationResult:
+    """A failing verdict, optionally naming the steps that must be retried."""
+    return EvaluationResult(
+        passed=False,
+        reason=reason,
+        step_evaluations=tuple(
+            StepEvaluation(step_id=step_id, passed=False, feedback=reason)
+            for step_id in step_ids
+        ),
+    )
 
 
 def build_registry(*workers) -> WorkerRegistry:
@@ -125,10 +137,10 @@ def test_max_retries_zero_runs_a_single_attempt():
     assert len(aggregator.calls) == 1
 
 
-def test_retry_reruns_the_whole_plan_and_aggregates_once():
+def test_retry_re_executes_only_the_failed_step_and_aggregates_once():
     log: list[str] = []
     orchestrator, planner, evaluator, aggregator = build_orchestrator(
-        log=log, plan=two_step_plan(), verdicts=[failed("again"), passed()]
+        log=log, plan=two_step_plan(), verdicts=[failed("again", "step_2"), passed()]
     )
 
     assert orchestrator.run_pipeline("study asyncio", max_retries=1) == "final answer"
@@ -138,7 +150,6 @@ def test_retry_reruns_the_whole_plan_and_aggregates_once():
         "research",
         "coding",
         "evaluator",
-        "research",
         "coding",
         "evaluator",
         "aggregator",
@@ -153,7 +164,7 @@ def test_three_attempts_keep_one_plan_one_aggregation():
     orchestrator, planner, evaluator, aggregator = build_orchestrator(
         log=log,
         plan=two_step_plan(),
-        verdicts=[failed("one"), failed("two"), passed()],
+        verdicts=[failed("one", "step_1"), failed("two", "step_1"), passed()],
     )
 
     orchestrator.run_pipeline("study asyncio", max_retries=2)
@@ -169,7 +180,7 @@ def test_three_attempts_keep_one_plan_one_aggregation():
 def test_aggregator_receives_only_the_context_that_passed_evaluation():
     log: list[str] = []
     orchestrator, _, evaluator, aggregator = build_orchestrator(
-        log=log, plan=two_step_plan(), verdicts=[failed("again"), passed()]
+        log=log, plan=two_step_plan(), verdicts=[failed("again", "step_2"), passed()]
     )
 
     orchestrator.run_pipeline("study asyncio", max_retries=1)
@@ -184,7 +195,9 @@ def test_aggregator_receives_only_the_context_that_passed_evaluation():
 def test_exhausted_retry_raises_without_aggregating():
     log: list[str] = []
     orchestrator, planner, evaluator, aggregator = build_orchestrator(
-        log=log, plan=two_step_plan(), verdicts=[failed("one"), failed("two")]
+        log=log,
+        plan=two_step_plan(),
+        verdicts=[failed("one", "step_1"), failed("two", "step_1")],
     )
 
     with pytest.raises(RetryError) as excinfo:
@@ -198,7 +211,6 @@ def test_exhausted_retry_raises_without_aggregating():
         "coding",
         "evaluator",
         "research",
-        "coding",
         "evaluator",
     ]
     assert len(evaluator.calls) == 2

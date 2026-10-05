@@ -22,10 +22,11 @@ Flow (Phase 4D, aggregation)::
 
     ExecutionContext -> Aggregator -> Final Answer
 
-Flow (Phase 4E, whole-plan retry)::
+Flow (Phase 5E, targeted retry)::
 
     Plan -> execute_plan_context -> Evaluator -> passed? -> return context
-                                              -> failed? -> execute the plan again
+         -> failed? -> re-execute the failed steps only -> Evaluator
+         -> budget spent or no failed step left? -> RetryError
 
 Flow (Phase 4F, full pipeline)::
 
@@ -35,10 +36,11 @@ Flow (Phase 4F, full pipeline)::
 Each plan step is one independent worker call and steps run strictly in order.
 Every result carries its own ``PlanStep`` metadata, so a result never has to be
 matched back to its step by position. Every step - whether it runs as part of a
-whole plan or on its own - goes through :meth:`Orchestrator.execute_step`, so
-there is exactly one worker-dispatch path. Retries are evaluator-driven and
-always re-run the whole plan: there is no replanning, no targeted per-step
-retry and no parallel execution.
+whole plan, on its own, or again during a targeted retry - goes through
+:meth:`Orchestrator.execute_step`, so there is exactly one worker-dispatch path.
+Retries are evaluator-driven and target only the steps the evaluator marked as
+failed; a failure that cannot be tied to any plan step fails explicitly instead
+of re-running the plan. There is no replanning and no parallel execution.
 """
 
 from __future__ import annotations
@@ -201,50 +203,104 @@ class Orchestrator:
         *,
         max_retries: int = 1,
     ) -> ExecutionContext:
-        """Execute ``plan``, evaluate it, and re-run the whole plan on failure.
+        """Execute ``plan``, evaluate it, and re-run only the failed steps.
 
-        ``max_retries`` counts the extra attempts *after* the first execution,
-        so the plan runs at most ``max_retries + 1`` times and is evaluated at
-        most ``max_retries + 1`` times. Every attempt re-executes the plan from
-        scratch through :meth:`execute_plan_context`: nothing is cached and no
-        result is reused. The plan itself is never modified and never re-planned.
+        The plan is executed once through :meth:`execute_plan_context` and then
+        evaluated. On ``passed=False`` the retry controller reads
+        :attr:`EvaluationResult.failed_step_ids` and re-executes exactly those
+        steps - in plan order, each through :meth:`execute_step` - before
+        evaluating the updated context once. Steps that passed are never run
+        again, and the plan is never modified and never re-planned.
 
-        Only ``EvaluationResult.passed is False`` starts another attempt. Errors
-        raised while executing the plan or while evaluating it (``WorkerError``,
+        ``max_retries`` counts the targeted retry rounds *after* the first
+        execution, so ``max_retries=0`` fails right after the initial
+        evaluation, ``max_retries=1`` allows one retry round and so on.
+
+        A failure whose ``failed_step_ids`` is empty is not retryable; it is
+        reported as a ``RetryError`` rather than re-running the whole plan,
+        because there is no step the controller can safely re-execute. If
+        ``failed_step_ids`` names a step that is not in the plan, the round is
+        rejected before anything runs, so a failure is never partially retried.
+
+        Only ``EvaluationResult.passed is False`` starts another round. Errors
+        raised while executing a step or while evaluating it (``WorkerError``,
         ``RegistryError``, ``EvaluatorError``, ``EvaluationError``) propagate
         unchanged and never trigger a retry.
 
         Raises:
             OrchestratorError: ``plan`` is not a Plan, no evaluator was
                 configured, or ``max_retries`` is not a non-negative int.
-            RetryError: the evaluator reported ``passed=False`` and no attempts
-                are left.
+            RetryError: evaluation failed with no retryable step, or the retry
+                budget was exhausted before the results passed.
             RegistryError: a step names a worker that is not registered.
             WorkerError: a worker failed while handling its step.
             EvaluatorError: the evaluator could not produce a verdict.
         """
         if not isinstance(plan, Plan):
             raise OrchestratorError(f"plan must be a Plan, got {type(plan).__name__}.")
-        attempts = self._validated_attempt_budget(max_retries)
+        attempts_allowed = self._validated_attempt_budget(max_retries)
         if self._evaluator is None:
             raise OrchestratorError(
                 "no evaluator configured; pass evaluator=... when constructing "
                 "Orchestrator to use execute_plan_with_retry()."
             )
 
-        last_reason = ""
-        for _ in range(attempts):
-            context = self.execute_plan_context(plan)
+        context = self.execute_plan_context(plan)
 
+        attempts = 0
+        while True:
             evaluation = self._evaluator.evaluate(context)
+            attempts += 1
             if evaluation.passed:
                 return context
 
-            last_reason = evaluation.reason
+            failed_step_ids = evaluation.failed_step_ids
+            if not failed_step_ids:
+                raise RetryError(
+                    "evaluation failed but no retryable step was identified: "
+                    f"{evaluation.reason}"
+                )
+            planned_step_ids = {step.id for step in plan.steps}
+            unknown_step_ids = [
+                step_id
+                for step_id in failed_step_ids
+                if step_id not in planned_step_ids
+            ]
+            if unknown_step_ids:
+                raise RetryError(
+                    "evaluation failed and named steps that are not in the "
+                    f"plan: {', '.join(unknown_step_ids)}; "
+                    "no step was re-executed."
+                )
+            if attempts >= attempts_allowed:
+                raise RetryError(
+                    f"evaluation failed after {attempts} attempt(s): "
+                    f"{evaluation.reason}"
+                )
 
-        raise RetryError(
-            f"evaluation failed after {attempts} attempt(s): {last_reason}"
-        )
+            context = self._retry_failed_steps(plan, context, failed_step_ids)
+
+    def _retry_failed_steps(
+        self,
+        plan: Plan,
+        context: ExecutionContext,
+        failed_step_ids: tuple[str, ...],
+    ) -> ExecutionContext:
+        """Re-execute the failed steps in plan order and return a new context.
+
+        Every step is re-run through :meth:`execute_step`, so the retry path and
+        the initial plan loop share one worker-dispatch implementation. Each
+        fresh result replaces that step's current result through
+        :meth:`ExecutionContext.replace_step_result`, so a step only ever keeps
+        one current result and ``plan`` is never changed.
+        """
+        failed = set(failed_step_ids)
+        updated = context
+        for step in plan.steps:
+            if step.id in failed:
+                result = self.execute_step(step)
+                updated = updated.replace_step_result(step.id, result)
+        return updated
 
     @staticmethod
     def _validated_attempt_budget(max_retries: int) -> int:
@@ -268,7 +324,7 @@ class Orchestrator:
 
         It is pure orchestration over the existing high-level methods: the
         planner runs exactly once, :meth:`execute_plan_with_retry` executes
-        (and re-executes) the plan and evaluates it, and only the context that
+        and re-executes only the failed steps, and only the context that
         passed evaluation is handed to :meth:`aggregate`. Nothing is cached,
         re-planned or run in parallel, and no exception is swallowed.
 
@@ -279,8 +335,8 @@ class Orchestrator:
         Raises:
             OrchestratorError: no planner, evaluator or aggregator configured,
                 or ``max_retries`` is not a non-negative int.
-            RetryError: the evaluator reported ``passed=False`` and the retry
-                budget is exhausted; the aggregator is not called.
+            RetryError: evaluation failed with no retryable step, or the
+                retry budget is exhausted; the aggregator is not called.
             PlannerError: the planner could not produce a valid plan.
             RegistryError: a step names a worker that is not registered.
             WorkerError: a worker failed while handling its step.
