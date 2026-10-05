@@ -52,6 +52,53 @@ class ExecutionContext:
                 )
         self._validate_step_coverage()
 
+    def replace_step_result(
+        self, step_id: str, result: ExecutionResult
+    ) -> "ExecutionContext":
+        """Return a copy of this context with ``step_id``'s current result replaced.
+
+        A step always has exactly one *current* result: the existing entry is
+        swapped for ``result`` in place, never appended, so a step can never
+        end up with two results. ``plan`` and every other step's result are
+        reused unchanged.
+
+        Raises:
+            ExecutionContextError: ``step_id`` is not a non-empty string, the
+                replacement is not an :class:`ExecutionResult`, the result
+                belongs to a different step, or ``step_id`` is not a step of
+                the plan. There is deliberately no implicit append of an
+                unknown step.
+        """
+        if not isinstance(step_id, str) or not step_id.strip():
+            raise ExecutionContextError("step_id must be a non-empty string.")
+        if not isinstance(result, ExecutionResult):
+            raise ExecutionContextError(
+                "replacement must be an ExecutionResult, "
+                f"got {type(result).__name__}."
+            )
+        if result.step_id != step_id:
+            raise ExecutionContextError(
+                f"result for step {result.step_id!r} cannot replace step "
+                f"{step_id!r}."
+            )
+
+        planned = {step.id for step in self.plan.steps}
+        if step_id not in planned:
+            raise ExecutionContextError(
+                f"cannot replace the result of unknown step {step_id!r}; "
+                f"plan steps: {', '.join(sorted(planned)) or '(none)'}."
+            )
+        if not any(existing.step_id == step_id for existing in self.results):
+            raise ExecutionContextError(
+                f"step {step_id!r} has no current result to replace."
+            )
+
+        replaced = tuple(
+            result if existing.step_id == step_id else existing
+            for existing in self.results
+        )
+        return ExecutionContext(plan=self.plan, results=replaced)
+
     def _validate_step_coverage(self) -> None:
         """Check that the results describe exactly the steps of the plan."""
         planned = [step.id for step in self.plan.steps]

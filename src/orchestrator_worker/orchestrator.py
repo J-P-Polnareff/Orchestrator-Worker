@@ -34,9 +34,11 @@ Flow (Phase 4F, full pipeline)::
 
 Each plan step is one independent worker call and steps run strictly in order.
 Every result carries its own ``PlanStep`` metadata, so a result never has to be
-matched back to its step by position. Retries are evaluator-driven and always
-re-run the whole plan: there is no replanning, no targeted per-step retry and
-no parallel execution.
+matched back to its step by position. Every step - whether it runs as part of a
+whole plan or on its own - goes through :meth:`Orchestrator.execute_step`, so
+there is exactly one worker-dispatch path. Retries are evaluator-driven and
+always re-run the whole plan: there is no replanning, no targeted per-step
+retry and no parallel execution.
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ from .aggregators.base import Aggregator
 from .context import ExecutionContext
 from .evaluators.base import Evaluator
 from .execution import ExecutionResult
-from .plan import Plan
+from .plan import Plan, PlanStep
 from .planner.base import Planner
 from .retry import RetryError
 from .router import Router
@@ -117,36 +119,50 @@ class Orchestrator:
     def execute_plan(self, plan: Plan) -> list[ExecutionResult]:
         """Execute ``plan`` step by step, in order, and return one result per step.
 
-        Every step is routed independently through the router, which looks the
-        worker up by ``step.worker_name``; the planner is not consulted again.
-        Steps run strictly sequentially and each result keeps the step it came
-        from, so results are returned in the same order as ``plan.steps``.
+        Every step is executed by :meth:`execute_step`, so the plan loop and
+        any single-step re-execution share one worker-dispatch path. The step is
+        routed independently through the router, which looks the worker up by
+        ``step.worker_name``; the planner is not consulted again. Steps run
+        strictly sequentially and each result keeps the step it came from, so
+        results are returned in the same order as ``plan.steps``.
 
         Raises:
             RegistryError: a step names a worker that is not registered.
             WorkerError: a worker failed while handling its step. Both errors
                 are propagated unchanged, with no fallback and no retry.
         """
-        results: list[ExecutionResult] = []
-        for step in plan.steps:
-            worker = self._router.resolve(step.worker_name)
-            output = worker.execute(step.task)
+        return [self.execute_step(step) for step in plan.steps]
 
-            state = AgentState(user_task=step.task)
-            state.worker_name = worker.name
-            state.worker_input = step.task
-            state.worker_output = output
-            state.final_result = output
+    def execute_step(self, step: PlanStep) -> ExecutionResult:
+        """Execute exactly one plan step and return its result.
 
-            results.append(
-                ExecutionResult(
-                    step_id=step.id,
-                    task=step.task,
-                    worker_name=worker.name,
-                    state=state,
-                )
-            )
-        return results
+        This is the single-step execution primitive that :meth:`execute_plan`
+        builds on, so the plan loop and any future single-step re-execution
+        share one worker-dispatch implementation. It resolves
+        ``step.worker_name`` through the deterministic router, runs that worker
+        once and wraps the outcome in an :class:`ExecutionResult`. It never
+        touches the planner, evaluator, aggregator or any retry logic, and it
+        never executes another step.
+
+        Raises:
+            RegistryError: the step names a worker that is not registered.
+            WorkerError: the worker failed while handling its step.
+        """
+        worker = self._router.resolve(step.worker_name)
+        output = worker.execute(step.task)
+
+        state = AgentState(user_task=step.task)
+        state.worker_name = worker.name
+        state.worker_input = step.task
+        state.worker_output = output
+        state.final_result = output
+
+        return ExecutionResult(
+            step_id=step.id,
+            task=step.task,
+            worker_name=worker.name,
+            state=state,
+        )
 
     def execute_plan_context(self, plan: Plan) -> ExecutionContext:
         """Execute ``plan`` and return its results as an :class:`ExecutionContext`.
