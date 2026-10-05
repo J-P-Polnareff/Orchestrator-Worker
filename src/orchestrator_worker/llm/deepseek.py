@@ -9,13 +9,19 @@ Provider notes:
     not supported by ``deepseek-reasoner``.
   * Reasoning models return chain-of-thought separately; this adapter only
     surfaces the final ``content``.
+  * Tool calling uses the non-thinking, OpenAI-compatible function-call flow:
+    tool definitions go out as plain JSON-schema dicts and the response's
+    ``tool_calls`` are parsed back into provider-neutral ``ToolCall`` objects.
+    Nothing is executed here.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ..config import DEFAULT_BASE_URL, DEFAULT_MODEL
+from ..tools import Tool, ToolCall
 from .base import LLMClient, LLMError, LLMRequest, LLMResponse, Usage
 
 
@@ -71,6 +77,8 @@ class DeepSeekClient(LLMClient):
             payload["stop"] = list(request.stop)
         if request.json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if request.tools:
+            payload["tools"] = [_tool_payload(tool) for tool in request.tools]
 
         try:
             raw = self._client.chat.completions.create(**payload)
@@ -88,6 +96,7 @@ class DeepSeekClient(LLMClient):
             usage=_usage_from_raw(getattr(raw, "usage", None)),
             finish_reason=getattr(choice, "finish_reason", None),
             raw=raw,
+            tool_calls=_tool_calls_from_message(message),
         )
 
 
@@ -99,3 +108,73 @@ def _usage_from_raw(usage: Any | None) -> Usage:
         completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
         total_tokens=getattr(usage, "total_tokens", 0) or 0,
     )
+
+
+def _tool_payload(tool: Tool) -> dict[str, Any]:
+    """Serialize a Tool definition for an OpenAI-compatible request.
+
+    Only the public definition is sent; ``tool.handler`` never leaves the
+    process.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters,
+        },
+    }
+
+
+def _tool_calls_from_message(message: Any) -> tuple[ToolCall, ...]:
+    raw_calls = getattr(message, "tool_calls", None) or ()
+    return tuple(
+        _tool_call_from_raw(raw_call, index)
+        for index, raw_call in enumerate(raw_calls)
+    )
+
+
+def _tool_call_from_raw(raw_call: Any, index: int) -> ToolCall:
+    """Parse one provider tool call into a provider-neutral ``ToolCall``.
+
+    The generated ``arguments`` string is not guaranteed to be valid JSON, so it
+    is parsed and required to be a JSON object. Anything else fails loudly:
+    there is no defaulting, guessing or silent repair.
+    """
+    call_id = getattr(raw_call, "id", None)
+    if not isinstance(call_id, str) or not call_id.strip():
+        raise LLMError(f"DeepSeek tool call #{index} is missing a valid id.")
+
+    call_type = getattr(raw_call, "type", None)
+    if call_type != "function":
+        raise LLMError(
+            f"DeepSeek tool call #{index} has unsupported type {call_type!r}; "
+            "only 'function' is supported."
+        )
+
+    function = getattr(raw_call, "function", None)
+    if function is None:
+        raise LLMError(f"DeepSeek tool call #{index} is missing its function.")
+
+    name = getattr(function, "name", None)
+    if not isinstance(name, str) or not name.strip():
+        raise LLMError(f"DeepSeek tool call #{index} is missing a valid name.")
+
+    raw_arguments = getattr(function, "arguments", None)
+    if not isinstance(raw_arguments, str) or not raw_arguments.strip():
+        raise LLMError(f"DeepSeek tool call #{index} is missing its arguments.")
+
+    try:
+        arguments = json.loads(raw_arguments)
+    except json.JSONDecodeError as exc:
+        raise LLMError(
+            f"DeepSeek tool call #{index} returned malformed JSON arguments: {exc}"
+        ) from exc
+
+    if not isinstance(arguments, dict):
+        raise LLMError(
+            f"DeepSeek tool call #{index} arguments must be a JSON object, "
+            f"got {type(arguments).__name__}."
+        )
+
+    return ToolCall(id=call_id, name=name, arguments=arguments)

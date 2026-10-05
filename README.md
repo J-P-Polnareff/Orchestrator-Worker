@@ -7,10 +7,11 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 5C-1 (tool foundation)**. `build_orchestrator()` assembles
-the concrete components into a ready `Orchestrator`, and a provider-neutral tool
-layer (`Tool` / `ToolRegistry` / `ToolExecutor`) exists alongside it. The flow
-below is unchanged and no tool calling is wired in yet.
+Current status: **Phase 5C-2 (LLM tool-call contract)**. The provider-neutral
+tool layer now has a matching LLM contract: requests can carry `Tool`
+definitions, responses carry parsed `ToolCall` objects, and assistant/tool
+messages are representable. The flow below is unchanged and nothing executes a
+tool yet.
 
 Routing - `Orchestrator.run(task, worker_name=...)`:
 
@@ -111,8 +112,9 @@ src/orchestrator_worker/
   application.py   build_orchestrator(): concrete wiring for a ready Orchestrator
   tools.py         Tool / ToolCall / ToolResult + ToolRegistry and ToolExecutor
   llm/
-    base.py        Message, Usage, LLMRequest, LLMResponse, LLMClient (ABC)
-    deepseek.py    DeepSeek adapter over the openai SDK
+    base.py        Message (tool calls/results), LLMRequest (tools),
+                   LLMResponse (tool_calls), Usage, LLMClient (ABC)
+    deepseek.py    DeepSeek adapter: Tool definitions out, parsed ToolCalls back
     factory.py     provider registry -> build_llm_client()
   planner/
     base.py        Planner contract + planner errors
@@ -376,6 +378,46 @@ This layer is deliberately not connected to the model yet: there is no LLM tool
 calling, no tool loop, and no change to `LLMClient`, the workers, the planner,
 the evaluator, the aggregator or the orchestrator. Offering tools to a provider
 and driving the call/execute cycle from a model response is the next step.
+
+### Phase 5C-2 LLM tool-call contract
+
+```python
+from orchestrator_worker.llm import LLMRequest, Message
+from orchestrator_worker.tools import Tool, ToolCall
+
+request = LLMRequest(
+    messages=[Message.user("add 1 and 2")],
+    tools=(calculator,),                      # Tool definitions
+)
+response = client.complete(request)
+
+for call in response.tool_calls:              # provider-neutral ToolCall
+    print(call.id, call.name, call.arguments)
+
+# continue the conversation with the call and its result
+messages = [
+    Message.user("add 1 and 2"),
+    Message(role="assistant", content="", tool_calls=response.tool_calls),
+    Message.tool("3", response.tool_calls[0].id),
+]
+```
+
+`LLMRequest.tools` and `LLMResponse.tool_calls` default to empty tuples, so every
+existing construction keeps working. `Message` gained `tool_calls` (allowed only
+on an assistant message) and `tool_call_id` (allowed only on a tool message,
+which must set it); plain system/user/assistant messages serialize exactly as
+before. There is no `tool_choice` yet.
+
+The DeepSeek adapter owns the translation: it sends each `Tool` as an
+OpenAI-compatible `{"type": "function", "function": {...}}` entry (never the
+handler) and parses `message.tool_calls` back into `ToolCall` objects, requiring
+`arguments` to be a JSON *object*. Missing or empty ids and names, unsupported
+tool types, malformed JSON and non-object JSON all raise `LLMError` instead of
+being repaired, and no provider SDK object leaves the adapter.
+
+Still out of scope: there is no tool-execution loop, no automatic tool
+execution, no worker tool integration and no MCP. Executing a `ToolCall` and
+feeding the `ToolResult` back to the model is the next step.
 
 ## Tests
 
