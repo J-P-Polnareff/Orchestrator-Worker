@@ -7,12 +7,12 @@ User -> Orchestrator -> Planner -> Worker Router -> Workers
      -> Evaluator -> Aggregator -> Final Answer
 ```
 
-Current status: **Phase 5C-3 (tool execution loop)**. On top of the
-provider-neutral tool layer and the LLM tool-call contract, a standalone
-`ToolLoop` now drives `LLM -> ToolCall -> ToolExecutor -> ToolResult -> LLM`
-until the model stops requesting tools. It is bounded by `max_rounds` and runs
-tools sequentially; the flow below is unchanged and the loop is not yet wired
-into a worker or the orchestrator.
+Current status: **Phase 5C-4A (tool-enabled worker boundary)**. On top of the
+tool execution loop, a `ToolEnabledWorker` now holds its own allowed `Tool`
+definitions and runs a task through an injected `ToolLoop`, turning the final
+`LLMResponse` back into a worker result. The loop stays the only tool runtime
+entry point, and the flow below is unchanged: no existing worker, the
+orchestrator or the application is wired to tools yet.
 
 Routing - `Orchestrator.run(task, worker_name=...)`:
 
@@ -126,6 +126,7 @@ src/orchestrator_worker/
     registry.py    WorkerRegistry, maps worker names to worker instances
     research.py    ResearchWorker, a single LLM call with no tools
     coding.py      CodingWorker, coding-oriented prompt, no code execution
+    tool_enabled.py  ToolEnabledWorker: Worker <-> ToolLoop boundary
 tests/             unit tests (network-free)
 ```
 ## Setup
@@ -448,8 +449,36 @@ could ever reach the model. A failing tool (`ToolExecutionError`) becomes an
 (`ToolRegistryError`) and an `LLMError` propagate unchanged: the loop never
 retries the model, never replans and never triggers the Orchestrator retry.
 
-Still out of scope: no worker tool integration, no orchestrator integration, no
-`tool_choice` and no MCP.
+Still out of scope there: no orchestrator integration, no `tool_choice` and no
+MCP.
+
+### Phase 5C-4A Tool-enabled worker boundary
+
+```python
+from orchestrator_worker.workers.tool_enabled import ToolEnabledWorker
+
+class ResearchToolWorker(ToolEnabledWorker):
+    name = "research"
+    system_prompt = "You are a research worker that may use tools."
+
+worker = ResearchToolWorker(tool_loop, tools=(calculator,))   # ToolLoop injected
+answer = worker.execute("add 1 and 2 and explain the result")
+```
+
+`ToolEnabledWorker` is the Worker <-> ToolLoop seam. It stores the exact `Tool`
+tuple it is allowed to request, builds an `LLMRequest` with those tools plus its
+system/user messages, and calls `tool_loop.run(...)` once. The loop owns every
+model call and every tool result, so the worker never executes a tool, never
+looks one up and never re-runs a request.
+
+The `ToolLoop` and the allowed tools are both injected: the worker builds no
+loop, no registry and no model client. Subclasses only supply their identity and
+prompt (`name`, `system_prompt`, or a full `build_request` override); the base
+class handles the tool wiring and the `LLMResponse` -> `str` conversion.
+`ResearchWorker` and `CodingWorker` are untouched and stay tool-free.
+
+Still out of scope: no concrete research/coding tool worker, no orchestrator
+wiring and no application wiring - that is Phase 5C-4B.
 
 ## Tests
 
